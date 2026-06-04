@@ -8,5 +8,17 @@
   "interface": {
     "displayName": "Agent Unity Wrapper",
     "shortDescription": "Pairs the external Unity MCP server with a skill so Claude can drive the Unity editor - inspecting scenes, GameObjects, and assets - through structured MCP operations instead of guessing project state."
+  },
+  "mcpServers": {
+    "unityMCP": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcpforunityserver==9.7.1",
+        "mcp-for-unity",
+        "--transport",
+        "stdio"
+      ]
+    }
   }
 }

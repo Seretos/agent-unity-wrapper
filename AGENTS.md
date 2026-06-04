@@ -2,7 +2,7 @@
 
 Pure skill plugin — no binary of its own. It wraps the **external Unity MCP server**: a skill teaches Claude how to drive it, and (once wired) the manifests point at that MCP. This repo ships **only** the skill + manifests; the Unity MCP itself is a separate, pre-existing server.
 
-> **Scaffold state:** this is the empty wrapper frame. The Unity MCP is **not yet wired** — `mcpServers` is intentionally absent from both manifests and the skill's tool inventory is a stub. Wiring the MCP (inline `mcpServers` block + skill tool docs) is tracked separately. See `agent-serena-wrapper` for the finished shape of a wrapped-MCP plugin.
+> **Wired.** The Unity MCP (`mcpforunityserver==9.7.1`) is now wired into both manifests under the server key `unityMCP`. The scaffold state is resolved: `mcpServers` is present inline in both `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`, and `skills/unity-wrapper/SKILL.md` contains the full tool inventory and usage docs.
 
 ## Contracts an agent won't infer from the tree
 

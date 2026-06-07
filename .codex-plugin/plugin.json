@@ -18,7 +18,10 @@
         "mcp-for-unity",
         "--transport",
         "stdio"
-      ]
+      ],
+      "env": {
+        "UNITY_MCP_STATUS_DIR": ".unity-mcp"
+      }
     }
   }
 }

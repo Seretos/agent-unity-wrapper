@@ -103,6 +103,62 @@ the upstream `CoplayDev/unity-mcp` server.
 3. Perform any play-mode-specific queries (e.g. reading runtime component values).
 4. Use **play-mode control** to exit Play mode before making any scene edits.
 
+## Per-worktree Unity instances (worktree gate)
+
+When the session runs inside a **git worktree** (via `agent-worktree`), each worktree
+needs its **own** Unity Editor instance, and this session's MCP server must bind to
+*that* instance with no manual "select instance" UI step. This is achieved with
+**status-dir isolation** — no runtime routing logic in the skill.
+
+### Status-dir isolation contract
+
+Both halves of the Unity MCP point at the **same, worktree-local** status directory via
+`UNITY_MCP_STATUS_DIR`:
+
+- **MCP server side** — already wired in the manifests' `unityMCP.env`:
+  - Claude: `UNITY_MCP_STATUS_DIR=${CLAUDE_PROJECT_DIR}/.unity-mcp` (absolute).
+  - Codex: `UNITY_MCP_STATUS_DIR=.unity-mcp` (relative; the server resolves it against
+    its working directory, which Codex sets to the project/worktree root).
+- **Unity editor side** — the `start` step (below) launches Unity with the **absolute**
+  `<worktree>/.unity-mcp`.
+
+Both the Unity C# bridge and the Python server use this value **literally** (no `~`
+expansion, no relative-path rewriting on the Unity side), so the editor launch must pass
+an **absolute** path. When both sides resolve to the same directory, the server discovers
+**exactly one** instance and auto-connects.
+
+### The gate — when config is missing, run the prepare-script
+
+When working in a worktree on a Unity project and the per-worktree Unity config is missing
+or incomplete — i.e. `.seretos/worktree-setup.yml` has no `mcp-unity-bridge-*` block, or
+`Packages/manifest.json` lacks `com.coplaydev.unity-mcp` — run the idempotent prepare-script
+**once at repo level**, then commit:
+
+```
+pwsh -File ${CLAUDE_PLUGIN_ROOT}/scripts/prepare-unity-worktree.ps1
+```
+
+It detects existing config and only fills gaps (never clobbers a foreign `start:`/`stop:`
+block; pass `-Force` to refresh the managed block or flip `isolation` to `full`). Because a
+worktree is a checkout of the same repo, the tracked files it writes inherit to every future
+worktree — so you prepare once, not per worktree. Requires PowerShell 7+ for the launched
+start/stop steps.
+
+### Launch flow
+
+1. `worktree_start` (agent-worktree) runs the `start` step → launches a **headless** Unity
+   (`-batchmode -nographics -projectPath <worktree>`) bound to the worktree, with
+   `UNITY_MCP_STATUS_DIR=<worktree>/.unity-mcp` and
+   `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi` to boot the in-editor
+   bridge. The launched PID is recorded in `.unity-mcp/unity.pid`.
+2. The bridge writes its status file into the worktree-local `.unity-mcp`; this session's
+   MCP server (pointed at the same dir) discovers the one instance and auto-connects.
+3. `worktree_stop` runs the `stop` step → kills the recorded Unity PID.
+
+Set `UNITY_EDITOR_PATH` to your Unity Editor binary to override editor resolution; if unset,
+the start step derives the version from `ProjectSettings/ProjectVersion.txt` and looks under
+the Unity Hub default install path.
+
 ## Pitfalls
 
 1. **Unity-side bridge is a hard prerequisite.** The `MCP For Unity` C# package must be
@@ -124,5 +180,9 @@ the upstream `CoplayDev/unity-mcp` server.
 
 4. **No project-path flag in the manifest by design.** The manifest does not bake in a
    Unity project path. The Python server discovers the running Unity editor via the
-   bridge socket automatically. Never add an env-specific project path to the manifest —
-   it would break the plugin for every other user.
+   bridge socket automatically. Never add an env-specific *absolute* project path to the
+   manifest — it would break the plugin for every other user. The one env the manifest
+   *does* set, `UNITY_MCP_STATUS_DIR`, is intentional and host-portable
+   (`${CLAUDE_PROJECT_DIR}/.unity-mcp` on Claude, cwd-relative `.unity-mcp` on Codex) — it
+   enables per-worktree status-dir isolation (see "Per-worktree Unity instances"), not a
+   hardcoded path.

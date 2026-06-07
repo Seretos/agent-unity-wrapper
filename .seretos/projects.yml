@@ -14,3 +14,31 @@ projects:
         create: true
         modify: true
         merge: false
+
+  - id: lib-python-vdesktop
+    description: ""
+    provider: github
+    path: Seretos/lib-python-vdesktop
+    token_env: GITHUB_TOKEN
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: false
+        modify: false
+        merge: false
+
+  - id: agent-vdesktop
+    description: Microsoft Virtual Desktop management MCP plugin for Claude Code
+    provider: github
+    path: Seretos/agent-vdesktop
+    token_env: GITHUB_TOKEN
+    permissions:
+      issues:
+        create: true
+        modify: true
+      pulls:
+        create: false
+        modify: false
+        merge: false

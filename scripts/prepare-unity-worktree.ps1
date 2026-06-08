@@ -126,6 +126,10 @@ start:
           '-projectPath', $proj,
           '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
       )
+      if ($env:UNITY_WORKTREE_GUI -eq '1') {
+          $unityArgs = $unityArgs | Where-Object { $_ -notin @('-batchmode', '-nographics') }
+          Write-Host "UNITY_WORKTREE_GUI=1: launching visible editor (no batchmode)"
+      }
       $p = Start-Process -FilePath $editor -ArgumentList $unityArgs -PassThru
       Set-Content -Path (Join-Path $statusDir 'unity.pid') -Value $p.Id
       Write-Host "Unity bridge launched (pid $($p.Id)) -> $statusDir"
@@ -181,6 +185,15 @@ else {
             }
         } else {
             Write-Info "Managed Unity block already present - nothing to do (use -Force to refresh)."
+            # Detect old blocks that pre-date UNITY_WORKTREE_GUI support.
+            $blockStart = $content.IndexOf($startMarker)
+            $blockEnd   = $content.IndexOf($endMarker, $blockStart)
+            if ($blockStart -ge 0 -and $blockEnd -ge 0) {
+                $existingBlock = $content.Substring($blockStart, ($blockEnd + $endMarker.Length) - $blockStart)
+                if ($existingBlock -notmatch 'UNITY_WORKTREE_GUI') {
+                    Write-Warn2 "The existing managed block does not include UNITY_WORKTREE_GUI support. Re-run with -Force to refresh the block and enable GUI-mode switching."
+                }
+            }
         }
     }
     elseif ($content -match '(?m)^\s*(start|stop)\s*:') {
@@ -225,7 +238,19 @@ if (Test-Path $manifestPath) {
     }
     $hasPkg = $manifest.dependencies.PSObject.Properties.Name -contains $pkgName
     if ($hasPkg) {
-        Write-Info "Packages/manifest.json already references $pkgName."
+        $currentPin = $manifest.dependencies.$pkgName
+        if ($currentPin -eq $pkgUrl) {
+            Write-Info "Packages/manifest.json already references $pkgName at the correct version."
+        } elseif ($Force) {
+            $manifest.dependencies.$pkgName = $pkgUrl
+            Write-Utf8NoBom -Path $manifestPath -Content (($manifest | ConvertTo-Json -Depth 32))
+            Write-Info "Updated $pkgName pin from '$currentPin' to '$pkgUrl' (-Force)."
+        } else {
+            # Extract the #fragment for a readable current-vs-expected display.
+            $currentTag  = if ($currentPin  -match '#(.+)$') { $Matches[1] } else { $currentPin }
+            $expectedTag = if ($pkgUrl      -match '#(.+)$') { $Matches[1] } else { $pkgUrl }
+            Write-Warn2 "Packages/manifest.json references $pkgName at a different version: current='$currentTag' ($currentPin), expected='$expectedTag' ($pkgUrl). Re-run with -Force to reconcile."
+        }
     } else {
         $manifest.dependencies | Add-Member -NotePropertyName $pkgName -NotePropertyValue $pkgUrl -Force
         Write-Utf8NoBom -Path $manifestPath -Content (($manifest | ConvertTo-Json -Depth 32))
@@ -240,7 +265,7 @@ if (Test-Path $manifestPath) {
 $gitignorePath = Join-Path $RepoRoot '.gitignore'
 $ignoreLine = '.unity-mcp/'
 $gi = if (Test-Path $gitignorePath) { Get-Content -LiteralPath $gitignorePath -Raw } else { '' }
-if ($gi -match '(?m)^\s*\.unity-mcp/?\s*$') {
+if ($gi -match '(?m)^\s*/?\.unity-mcp/?\s*$') {
     Write-Info ".gitignore already ignores .unity-mcp/."
 } else {
     $newGi = ($gi.TrimEnd() + "`n`n# Per-worktree Unity MCP status dir (agent-unity-wrapper)`n$ignoreLine`n").TrimStart("`n")

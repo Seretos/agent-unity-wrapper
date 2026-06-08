@@ -127,6 +127,22 @@ expansion, no relative-path rewriting on the Unity side), so the editor launch m
 an **absolute** path. When both sides resolve to the same directory, the server discovers
 **exactly one** instance and auto-connects.
 
+### When to boot (opt-in)
+
+Preparing the worktree (running the prepare-script and committing the result) does **not**
+require booting Unity. The decision point is whether the ticket actually needs the Unity
+editor at all:
+
+- **Editor-touching tickets** (scene edits, component changes, Play-mode testing, asset
+  inspection): run `worktree_start` to execute the `start:` block and boot Unity, then
+  proceed with MCP tool calls.
+- **Backend / non-editor tickets** (pure C# logic, server code, CI config, etc.): skip
+  `worktree_start` entirely — zero Unity processes, zero resource cost.
+
+`worktree_stop` tears Unity down cleanly and is safe to call even if Unity was never
+started — the stop script is guarded by a pid-file existence check and exits silently when
+the pid file is absent.
+
 ### The gate — when config is missing, run the prepare-script
 
 When working in a worktree on a Unity project and the per-worktree Unity config is missing
@@ -158,6 +174,34 @@ start/stop steps.
 Set `UNITY_EDITOR_PATH` to your Unity Editor binary to override editor resolution; if unset,
 the start step derives the version from `ProjectSettings/ProjectVersion.txt` and looks under
 the Unity Hub default install path.
+
+### GUI / interactive launch
+
+By default `worktree_start` boots Unity **headless** (`-batchmode -nographics`), which is
+the correct mode for CI and automated MCP tool calls. When you need a visible editor
+(interactive editing, visual debugging, Play-mode with graphics), set the environment
+variable **before** calling `worktree_start`:
+
+```
+$env:UNITY_WORKTREE_GUI = '1'   # PowerShell
+# or
+export UNITY_WORKTREE_GUI=1     # bash / zsh
+```
+
+This is the **first-class documented switch** — it does **not** require editing the managed
+block in `.seretos/worktree-setup.yml`. When the flag is set, the managed `start:` step
+omits `-batchmode` and `-nographics`, launching a visible editor instead. On Windows the
+existing `Start-Process -PassThru` already detaches the editor from the terminal, so the
+worktree shell remains usable. Trade-off: a visible editor window is created and the full
+editor UI loads, which costs more memory and startup time than headless mode.
+
+> **Repos prepared before this feature was added:** the `UNITY_WORKTREE_GUI` filter lives
+> inside the managed block written by the prepare-script. If your repo was prepared by an
+> older version of the script, the existing managed block does not contain the filter, so
+> setting `UNITY_WORKTREE_GUI=1` is silently inert. Re-run the prepare-script **with
+> `-Force`** to refresh the managed block, then commit the updated
+> `.seretos/worktree-setup.yml`. A freshly-prepared repo already has the filter and needs
+> no special action.
 
 ## Pitfalls
 

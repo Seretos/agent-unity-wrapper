@@ -203,6 +203,56 @@ editor UI loads, which costs more memory and startup time than headless mode.
 > `.seretos/worktree-setup.yml`. A freshly-prepared repo already has the filter and needs
 > no special action.
 
+### Cache Server (faster cold starts)
+
+On asset-heavy projects, `worktree_start` triggers a full asset re-import into the
+worktree-local `Library/` on first open. This can take several minutes before the C#
+bridge reports `ready`, and the cost is paid again for every new worktree. A Unity Cache
+Server (legacy protocol) or Unity Accelerator (same wire protocol) caches compiled import
+artefacts so subsequent worktrees pull from the cache instead of reimporting from scratch.
+
+To opt in, set the environment variable **before** calling `worktree_start`:
+
+```
+$env:UNITY_WORKTREE_CACHE_SERVER = 'localhost:10080'   # PowerShell
+# or
+export UNITY_WORKTREE_CACHE_SERVER=localhost:10080      # bash / zsh
+```
+
+When the variable is set, the managed `start:` step appends the following flags to the
+Unity invocation:
+
+```
+-EnableCacheServer -cacheServerEndpoint <host:port>
+```
+
+The value is passed verbatim as the endpoint — use `host:port` format (e.g.
+`localhost:10080` for a local Accelerator on its default port, or `192.168.1.5:10080`
+for a shared server on the network). When the variable is empty, whitespace-only, or
+unset, no cache-server flags are injected.
+
+**Sharing `Library/` via symlink is NOT the chosen approach.** Unity acquires an
+exclusive `Library/UnityLockfile` so only one editor process can own a `Library/` at a
+time. `Library/ArtifactDB` is a single-writer database that corrupts under concurrent
+access. When two worktrees track different commits their import metadata diverges,
+causing constant cache thrashing if they share a `Library/`. A Cache Server / Accelerator
+avoids all three problems: each worktree keeps its own `Library/` but pulls already-built
+artefacts from the shared cache over a network socket.
+
+**Running the Cache Server or Accelerator is out of scope for this plugin.** Setting up
+and launching a Unity Accelerator (or the legacy Unity Cache Server) on your machine or
+CI host is a separate step — see
+[Unity Accelerator docs](https://docs.unity3d.com/Manual/UnityAccelerator.html) and
+[Cache Server docs](https://docs.unity3d.com/Manual/CacheServer.html) upstream.
+
+> **Repos prepared before this feature was added:** the `UNITY_WORKTREE_CACHE_SERVER`
+> conditional lives inside the managed block written by the prepare-script. If your repo
+> was prepared by an older version of the script, the existing managed block does not
+> contain the conditional, so setting `UNITY_WORKTREE_CACHE_SERVER` is silently inert.
+> Re-run the prepare-script **with `-Force`** to refresh the managed block, then commit
+> the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo already has the
+> conditional and needs no special action.
+
 ## Pitfalls
 
 1. **Unity-side bridge is a hard prerequisite.** The `MCP For Unity` C# package must be

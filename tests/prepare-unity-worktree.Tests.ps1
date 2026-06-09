@@ -321,3 +321,121 @@ Describe 'plan-item-5: UNITY_WORKTREE_GUI runtime arg-filter' {
         $global:puw_managedBlock | Should Match 'notin'
     }
 }
+
+# ---------------------------------------------------------------------------
+Describe 'managed block content — cache server' {
+
+    It 'managed block contains UNITY_WORKTREE_CACHE_SERVER reference' {
+        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
+    }
+
+    It 'managed block contains -EnableCacheServer flag' {
+        $global:puw_managedBlock | Should Match 'EnableCacheServer'
+    }
+
+    It 'managed block contains -cacheServerEndpoint flag' {
+        $global:puw_managedBlock | Should Match 'cacheServerEndpoint'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Runtime test for the UNITY_WORKTREE_CACHE_SERVER arg-filter.
+#
+# Invoke-CacheServerArgFilter replicates the full $unityArgs construction plus
+# both the UNITY_WORKTREE_GUI and UNITY_WORKTREE_CACHE_SERVER conditionals,
+# matching the managed block exactly.  The structural tests above couple these
+# runtime assertions to the real script source.
+# ---------------------------------------------------------------------------
+Describe 'UNITY_WORKTREE_CACHE_SERVER runtime arg-filter' {
+
+    function Invoke-CacheServerArgFilter {
+        param(
+            [string]$CacheServerValue,
+            [string]$GuiFlagValue
+        )
+        $proj      = 'C:\fake\proj'
+        $statusDir = 'C:\fake\proj\.unity-mcp'
+        $log       = Join-Path $statusDir 'editor.log'
+        $unityArgs = @(
+            '-batchmode', '-nographics',
+            '-logFile', $log,
+            '-projectPath', $proj,
+            '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
+        )
+        if ($GuiFlagValue -eq '1') {
+            $unityArgs = $unityArgs | Where-Object { $_ -notin @('-batchmode', '-nographics') }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CacheServerValue)) {
+            $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $CacheServerValue)
+        }
+        return $unityArgs
+    }
+
+    It 'cache server null: -EnableCacheServer absent' {
+        (Invoke-CacheServerArgFilter -CacheServerValue $null) -contains '-EnableCacheServer' | Should Be $false
+    }
+
+    It 'cache server null: -cacheServerEndpoint absent' {
+        (Invoke-CacheServerArgFilter -CacheServerValue $null) -contains '-cacheServerEndpoint' | Should Be $false
+    }
+
+    It 'cache server empty string: -EnableCacheServer absent (IsNullOrWhiteSpace guard)' {
+        (Invoke-CacheServerArgFilter -CacheServerValue '') -contains '-EnableCacheServer' | Should Be $false
+    }
+
+    It 'cache server localhost:10080: -EnableCacheServer present' {
+        (Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080') -contains '-EnableCacheServer' | Should Be $true
+    }
+
+    It 'cache server localhost:10080: -cacheServerEndpoint present' {
+        (Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080') -contains '-cacheServerEndpoint' | Should Be $true
+    }
+
+    It 'cache server localhost:10080: endpoint value present in args' {
+        (Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080') -contains 'localhost:10080' | Should Be $true
+    }
+
+    It 'cache server set: -batchmode still present' {
+        (Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080') -contains '-batchmode' | Should Be $true
+    }
+
+    It 'cache server set: -projectPath still present' {
+        (Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080') -contains '-projectPath' | Should Be $true
+    }
+
+    It 'cache server set: -executeMethod still present' {
+        (Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080') -contains '-executeMethod' | Should Be $true
+    }
+
+    It 'GUI=1 and cache server set: -batchmode absent AND -EnableCacheServer present (coexistence)' {
+        $args = Invoke-CacheServerArgFilter -CacheServerValue 'localhost:10080' -GuiFlagValue '1'
+        ($args -contains '-batchmode')         | Should Be $false
+        ($args -contains '-EnableCacheServer') | Should Be $true
+    }
+
+    It 'structural coupling: managed block contains UNITY_WORKTREE_CACHE_SERVER' {
+        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
+    }
+}
+
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 — idempotency stale-block (cache server)' {
+
+    # Mirror of Fix-2b: warn when existing block predates UNITY_WORKTREE_CACHE_SERVER.
+    It 'Fix-2b-cache: emits a Write-Warning hint when existing block lacks UNITY_WORKTREE_CACHE_SERVER' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+
+            # Strip every line containing UNITY_WORKTREE_CACHE_SERVER to simulate an old block.
+            $content = Get-Content -LiteralPath $setupPath -Raw
+            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_CACHE_SERVER' }) -join "`n"
+            Write-Utf8NoBom -Path $setupPath -Content $stripped
+
+            $wv = $null
+            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
+            ($wv | Out-String) | Should Match '-Force'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+}

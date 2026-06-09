@@ -130,6 +130,10 @@ start:
           $unityArgs = $unityArgs | Where-Object { $_ -notin @('-batchmode', '-nographics') }
           Write-Host "UNITY_WORKTREE_GUI=1: launching visible editor (no batchmode)"
       }
+      if (-not [string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER)) {
+          $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
+          Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
+      }
       $p = Start-Process -FilePath $editor -ArgumentList $unityArgs -PassThru
       Set-Content -Path (Join-Path $statusDir 'unity.pid') -Value $p.Id
       Write-Host "Unity bridge launched (pid $($p.Id)) -> $statusDir"
@@ -190,8 +194,8 @@ else {
             $blockEnd   = $content.IndexOf($endMarker, $blockStart)
             if ($blockStart -ge 0 -and $blockEnd -ge 0) {
                 $existingBlock = $content.Substring($blockStart, ($blockEnd + $endMarker.Length) - $blockStart)
-                if ($existingBlock -notmatch 'UNITY_WORKTREE_GUI') {
-                    Write-Warn2 "The existing managed block does not include UNITY_WORKTREE_GUI support. Re-run with -Force to refresh the block and enable GUI-mode switching."
+                if ($existingBlock -notmatch 'UNITY_WORKTREE_GUI' -or $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER') {
+                    Write-Warn2 "The existing managed block does not include UNITY_WORKTREE_GUI and/or UNITY_WORKTREE_CACHE_SERVER support. Re-run with -Force to refresh the block and enable GUI-mode switching and cache server support."
                 }
             }
         }

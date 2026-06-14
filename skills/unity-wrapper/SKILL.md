@@ -253,6 +253,86 @@ CI host is a separate step — see
 > the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo already has the
 > conditional and needs no special action.
 
+### Warm-start: Mirror Main Library
+
+When a Unity Cache Server or Accelerator is not available, you can reduce cold-import
+time by pre-populating a new worktree's `Library/` from the main checkout before
+`worktree_start` opens Unity there. This is a lightweight, zero-infrastructure
+alternative to the Cache Server path (see above and #7). It is best-effort only — Unity
+may still reimport some or all assets depending on what has changed between the main
+checkout and the worktree branch.
+
+**Precondition: the main-checkout Unity Editor must not be running.** Unity holds an
+exclusive lock on `Library/` while it is open. Check that the lockfile is absent before
+copying:
+
+```
+# Confirm Unity is not running in the main checkout
+ls <main-checkout>/Temp/UnityLockfile   # must NOT exist
+```
+
+(`Temp/UnityLockfile` is the project-open lock Unity writes while an editor instance
+owns that project; it lives under `Temp/`, not `Library/`.)
+
+If the lockfile is present, wait for the editor to close or stop it first (`worktree_stop`
+if it was started by `agent-worktree`; otherwise close the editor window or kill the
+process). Do not copy a `Library/` while Unity holds the lock — partial copies produce
+corrupt import state.
+
+**Copy the `Library/` into the worktree:**
+
+```powershell
+# Windows (PowerShell) — exit codes 0–7 are success for robocopy
+# 0 = nothing to copy, 1 = files copied, 3 = files copied + extras deleted, 8+ = error
+robocopy <main-checkout>\Library <worktree>\Library /MIR /MT:16
+```
+
+```bash
+# POSIX (bash / zsh)
+rsync -a --delete <main-checkout>/Library/ <worktree>/Library/
+```
+
+> **robocopy exit-code note:** robocopy uses non-standard exit codes. Exit code 1 means
+> files were copied successfully (not an error). Exit codes 0–7 all indicate success;
+> code 8 and above indicate a real error. If you are checking `$LASTEXITCODE` in
+> PowerShell, treat any value ≤ 7 as success.
+
+**Stale-lockfile trap (force-killed editor):** if a previous editor run in the
+**worktree** was killed forcefully, it may have left a stale lockfile at
+`<worktree>/Temp/UnityLockfile`. Unity refuses to open the project while this file
+exists, logging `HandleProjectAlreadyOpenInAnotherInstance`. Delete it before calling
+`worktree_start`:
+
+```
+Remove-Item <worktree>\Temp\UnityLockfile -ErrorAction SilentlyContinue  # PowerShell
+# or
+rm -f <worktree>/Temp/UnityLockfile                                       # bash / zsh
+```
+
+**Honest caveat — this is best-effort, not guaranteed.** Real-world outcomes vary
+depending on how much has changed since the mirrored `Library/` was built:
+
+- Case #81 (branch-only delta, same project path): mirroring eliminated the cold import
+  entirely — Unity opened and the bridge reported `ready` without reimporting.
+- Case #86 (new project path): `Library/ArtifactDB` was invalidated because the stored
+  import metadata references the old absolute path; Unity performed a full reimport
+  anyway.
+
+Mirroring may help or may not, depending on how much has changed since the `Library/`
+was built. When it works, it can save several minutes; when it does not, the only cost
+is the time spent copying.
+
+The robust primary flow is plain `worktree_start` (headless, no extra env vars required):
+call `worktree_start` and poll until the bridge writes its status file into the
+worktree-local `.unity-mcp/` directory. If a visible editor is needed (interactive
+editing, visual debugging, Play-mode with graphics), add `UNITY_WORKTREE_GUI=1` before
+calling `worktree_start` — but GUI mode is an optional variant, not a requirement for
+reliable MCP usage. Mirroring is an optional accelerator applied *before*
+`worktree_start`, not a replacement for the documented launch flow.
+
+For a durable, infrastructure-backed alternative that survives project-path changes and
+branch switches, see the Cache Server section above.
+
 ## Pitfalls
 
 1. **Unity-side bridge is a hard prerequisite.** The `MCP For Unity` C# package must be

@@ -16,8 +16,9 @@
   Re-running it is a no-op once the repo is fully prepared.
 
   What it ensures:
-    1. `.seretos/worktree-setup.yml` carries a managed `start:`/`stop:` block that
-       launches Unity headless with `-projectPath <worktree>`,
+    1. `.seretos/worktree-setup.yml` carries a managed `start:`/`stop:` block with two
+       named start variants: `default` (headless, `-batchmode -nographics`) and `gui`
+       (visible editor). Both use `-projectPath <worktree>`,
        `UNITY_MCP_STATUS_DIR=<worktree>/.unity-mcp` (absolute) and
        `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi` so the in-editor
        bridge boots and writes its status file into the worktree-local status dir.
@@ -90,7 +91,7 @@ $endMarker   = '# <<< agent-unity-wrapper managed'
 $managedBlock = @'
 # >>> agent-unity-wrapper managed: per-worktree Unity bridge (do not edit between markers)
 start:
-  - name: mcp-unity-bridge-start
+  - name: default
     shell: pwsh
     run: |
       $ErrorActionPreference = 'Stop'
@@ -126,17 +127,55 @@ start:
           '-projectPath', $proj,
           '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
       )
-      if ($env:UNITY_WORKTREE_GUI -eq '1') {
-          $unityArgs = $unityArgs | Where-Object { $_ -notin @('-batchmode', '-nographics') }
-          Write-Host "UNITY_WORKTREE_GUI=1: launching visible editor (no batchmode)"
-      }
       if (-not [string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER)) {
           $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
           Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
       }
       $p = Start-Process -FilePath $editor -ArgumentList $unityArgs -PassThru
       Set-Content -Path (Join-Path $statusDir 'unity.pid') -Value $p.Id
-      Write-Host "Unity bridge launched (pid $($p.Id)) -> $statusDir"
+      Write-Host "Unity bridge launched headless (pid $($p.Id)) -> $statusDir"
+  - name: gui
+    shell: pwsh
+    run: |
+      $ErrorActionPreference = 'Stop'
+      $proj = (Get-Location).Path
+      $statusDir = Join-Path $proj '.unity-mcp'
+      New-Item -ItemType Directory -Force -Path $statusDir | Out-Null
+      # Resolve the Unity Editor: UNITY_EDITOR_PATH wins; else derive from
+      # ProjectVersion.txt against the Unity Hub default install location.
+      $editor = $env:UNITY_EDITOR_PATH
+      if ([string]::IsNullOrWhiteSpace($editor)) {
+          $verFile = Join-Path $proj 'ProjectSettings/ProjectVersion.txt'
+          if (-not (Test-Path $verFile)) {
+              throw "UNITY_EDITOR_PATH unset and ProjectSettings/ProjectVersion.txt not found"
+          }
+          $verLine = Get-Content $verFile | Where-Object { $_ -match '^m_EditorVersion:' } | Select-Object -First 1
+          $ver = ($verLine -replace 'm_EditorVersion:\s*', '').Trim()
+          if ($IsWindows)    { $editor = "C:/Program Files/Unity/Hub/Editor/$ver/Editor/Unity.exe" }
+          elseif ($IsMacOS)  { $editor = "/Applications/Unity/Hub/Editor/$ver/Unity.app/Contents/MacOS/Unity" }
+          else               { $editor = "$HOME/Unity/Hub/Editor/$ver/Editor/Unity" }
+      }
+      if (-not (Test-Path $editor)) {
+          throw "Unity Editor not found at '$editor' - set UNITY_EDITOR_PATH to your editor binary"
+      }
+      # Status-dir isolation: both the editor bridge and the session MCP server must
+      # point at this exact ABSOLUTE dir so the server discovers exactly one instance
+      # and auto-connects with no UI step.
+      $env:UNITY_MCP_STATUS_DIR = $statusDir
+      $env:UNITY_MCP_ALLOW_BATCH = '1'
+      $log = Join-Path $statusDir 'editor.log'
+      $unityArgs = @(
+          '-logFile', $log,
+          '-projectPath', $proj,
+          '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
+      )
+      if (-not [string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER)) {
+          $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
+          Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
+      }
+      $p = Start-Process -FilePath $editor -ArgumentList $unityArgs -PassThru
+      Set-Content -Path (Join-Path $statusDir 'unity.pid') -Value $p.Id
+      Write-Host "Unity bridge launched with visible editor (pid $($p.Id)) -> $statusDir"
 stop:
   - name: mcp-unity-bridge-stop
     shell: pwsh
@@ -189,13 +228,15 @@ else {
             }
         } else {
             Write-Info "Managed Unity block already present - nothing to do (use -Force to refresh)."
-            # Detect old blocks that pre-date UNITY_WORKTREE_GUI support.
+            # Detect old blocks that pre-date named-variant start steps (name: default / name: gui).
             $blockStart = $content.IndexOf($startMarker)
             $blockEnd   = $content.IndexOf($endMarker, $blockStart)
             if ($blockStart -ge 0 -and $blockEnd -ge 0) {
                 $existingBlock = $content.Substring($blockStart, ($blockEnd + $endMarker.Length) - $blockStart)
-                if ($existingBlock -notmatch 'UNITY_WORKTREE_GUI' -or $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER') {
-                    Write-Warn2 "The existing managed block does not include UNITY_WORKTREE_GUI and/or UNITY_WORKTREE_CACHE_SERVER support. Re-run with -Force to refresh the block and enable GUI-mode switching and cache server support."
+                if ($existingBlock -match 'UNITY_WORKTREE_GUI' -or
+                    $existingBlock -notmatch 'name: gui' -or
+                    $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER') {
+                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support."
                 }
             }
         }

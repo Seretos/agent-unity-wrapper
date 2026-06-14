@@ -73,6 +73,7 @@ jobs:
           cp .claude-plugin/plugin.json "$STAGE/.claude-plugin/"
           cp .codex-plugin/plugin.json  "$STAGE/.codex-plugin/"
           cp -a skills/. "$STAGE/skills/"
+          cp -a scripts "$STAGE/"
           cp README.md "$STAGE/"
           cp LICENSE "$STAGE/" 2>/dev/null || true
           # assets/ goes onto the orphan release branch so the dispatch

@@ -73,12 +73,29 @@ Describe 'prepare-unity-worktree.ps1 — managed block content' {
         $global:puw_managedBlock | Should Match 'nographics'
     }
 
-    It 'managed block contains UNITY_WORKTREE_GUI conditional (plan item 5)' {
-        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_GUI'
+    It 'managed block contains name: default step' {
+        $global:puw_managedBlock | Should Match 'name: default'
     }
 
-    It 'managed block uses -notin to filter -batchmode and -nographics when UNITY_WORKTREE_GUI is set' {
-        $global:puw_managedBlock | Should Match 'notin'
+    It 'managed block contains name: gui step' {
+        $global:puw_managedBlock | Should Match 'name: gui'
+    }
+
+    It 'managed block default step contains -batchmode' {
+        # Extract text from name: default up to (but not including) name: gui
+        $defaultSection = ($global:puw_managedBlock -split 'name: gui')[0]
+        $defaultSection | Should Match 'batchmode'
+    }
+
+    It 'managed block gui step does not contain -batchmode' {
+        # Extract text after name: gui and before stop:
+        $afterGui = ($global:puw_managedBlock -split 'name: gui')[1]
+        $guiSection = ($afterGui -split 'stop:')[0]
+        $guiSection | Should Not Match 'batchmode'
+    }
+
+    It 'managed block does not contain UNITY_WORKTREE_GUI' {
+        $global:puw_managedBlock | Should Not Match 'UNITY_WORKTREE_GUI'
     }
 
     It 'managed block boots the bridge via -executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi' {
@@ -219,27 +236,27 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
             $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
             # Corrupt the block to detect the rewrite.
             $content = Get-Content -LiteralPath $setupPath -Raw
-            $corrupted = $content -replace 'mcp-unity-bridge-start', 'mcp-unity-bridge-OLD'
+            $corrupted = $content -replace 'name: default', 'name: CORRUPTED'
             Write-Utf8NoBom -Path $setupPath -Content $corrupted
 
             & $global:puw_scriptPath -RepoRoot $tmp -Force | Out-Null
 
             $refreshed = Get-Content -LiteralPath $setupPath -Raw
-            $refreshed | Should Match 'mcp-unity-bridge-start'
-            $refreshed | Should Not Match 'mcp-unity-bridge-OLD'
+            $refreshed | Should Match 'name: default'
+            $refreshed | Should Not Match 'name: CORRUPTED'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    # Fix 2b — warn when existing block predates UNITY_WORKTREE_GUI support.
-    It 'Fix-2b: emits a Write-Warning hint when existing block lacks UNITY_WORKTREE_GUI' {
+    # Fix 2b — warn when existing block predates named-variant start steps.
+    It 'Fix-2b: emits a Write-Warning hint when existing block lacks name: gui (pre-named-variant block)' {
         $tmp = New-TempUnityRepo
         try {
             & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
             $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
 
-            # Strip every line containing UNITY_WORKTREE_GUI to simulate an old block.
+            # Strip every line containing 'name: gui' to simulate a pre-named-variant block.
             $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_GUI' }) -join "`n"
+            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'name: gui' }) -join "`n"
             Write-Utf8NoBom -Path $setupPath -Content $stripped
 
             $wv = $null
@@ -247,78 +264,23 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
             ($wv | Out-String) | Should Match '-Force'
         } finally { Remove-TempUnityRepo $tmp }
     }
-}
 
-# ---------------------------------------------------------------------------
-# Plan item 5 / Fix 3 — Runtime test for the UNITY_WORKTREE_GUI arg-filter.
-#
-# The $unityArgs construction and UNITY_WORKTREE_GUI conditional are replicated
-# here directly (matching the managed block exactly).  The structural tests in
-# the "managed block content" Describe above verify the conditional text is
-# present in the actual block, coupling these runtime tests to the real script.
-# ---------------------------------------------------------------------------
-Describe 'plan-item-5: UNITY_WORKTREE_GUI runtime arg-filter' {
+    # Fix 2b (variant) — warn when existing block still contains UNITY_WORKTREE_GUI (old env-var style).
+    It 'Fix-2b-gui-env: emits a Write-Warning hint when existing block contains UNITY_WORKTREE_GUI' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
 
-    function Invoke-UnityArgFilter {
-        param([string]$GuiFlagValue)
-        # Stub values for variables the snippet references.
-        $proj      = 'C:\fake\proj'
-        $statusDir = 'C:\fake\proj\.unity-mcp'
-        $log       = Join-Path $statusDir 'editor.log'
-        # Default args — mirrors the managed start block exactly.
-        $unityArgs = @(
-            '-batchmode', '-nographics',
-            '-logFile', $log,
-            '-projectPath', $proj,
-            '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
-        )
-        # UNITY_WORKTREE_GUI conditional — mirrors the managed start block exactly.
-        if ($GuiFlagValue -eq '1') {
-            $unityArgs = $unityArgs | Where-Object { $_ -notin @('-batchmode', '-nographics') }
-        }
-        return $unityArgs
-    }
+            # Inject old UNITY_WORKTREE_GUI text into the block to simulate an old env-var-style block.
+            $content = Get-Content -LiteralPath $setupPath -Raw
+            $injected = $content -replace '# <<< agent-unity-wrapper managed', "      if (`$env:UNITY_WORKTREE_GUI -eq '1') { Write-Host gui }`n# <<< agent-unity-wrapper managed"
+            Write-Utf8NoBom -Path $setupPath -Content $injected
 
-    It 'headless default: -batchmode present when flag is unset' {
-        (Invoke-UnityArgFilter -GuiFlagValue $null) -contains '-batchmode' | Should Be $true
-    }
-
-    It 'headless default: -nographics present when flag is unset' {
-        (Invoke-UnityArgFilter -GuiFlagValue $null) -contains '-nographics' | Should Be $true
-    }
-
-    It 'GUI mode: -batchmode absent when UNITY_WORKTREE_GUI=1' {
-        (Invoke-UnityArgFilter -GuiFlagValue '1') -contains '-batchmode' | Should Be $false
-    }
-
-    It 'GUI mode: -nographics absent when UNITY_WORKTREE_GUI=1' {
-        (Invoke-UnityArgFilter -GuiFlagValue '1') -contains '-nographics' | Should Be $false
-    }
-
-    It 'GUI mode: -logFile still present when UNITY_WORKTREE_GUI=1' {
-        (Invoke-UnityArgFilter -GuiFlagValue '1') -contains '-logFile' | Should Be $true
-    }
-
-    It 'GUI mode: -projectPath still present when UNITY_WORKTREE_GUI=1' {
-        (Invoke-UnityArgFilter -GuiFlagValue '1') -contains '-projectPath' | Should Be $true
-    }
-
-    It 'GUI mode: -executeMethod still present when UNITY_WORKTREE_GUI=1' {
-        (Invoke-UnityArgFilter -GuiFlagValue '1') -contains '-executeMethod' | Should Be $true
-    }
-
-    It 'inverse guard: -batchmode present when UNITY_WORKTREE_GUI=0 (not 1)' {
-        (Invoke-UnityArgFilter -GuiFlagValue '0') -contains '-batchmode' | Should Be $true
-    }
-
-    It 'inverse guard: -nographics present when UNITY_WORKTREE_GUI=0 (not 1)' {
-        (Invoke-UnityArgFilter -GuiFlagValue '0') -contains '-nographics' | Should Be $true
-    }
-
-    # Structural coupling: managed block must contain the identical conditional.
-    It 'managed block contains UNITY_WORKTREE_GUI conditional (structural coupling check)' {
-        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_GUI'
-        $global:puw_managedBlock | Should Match 'notin'
+            $wv = $null
+            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
+            ($wv | Out-String) | Should Match '-Force'
+        } finally { Remove-TempUnityRepo $tmp }
     }
 }
 
@@ -341,10 +303,11 @@ Describe 'managed block content — cache server' {
 # ---------------------------------------------------------------------------
 # Runtime test for the UNITY_WORKTREE_CACHE_SERVER arg-filter.
 #
-# Invoke-CacheServerArgFilter replicates the full $unityArgs construction plus
-# both the UNITY_WORKTREE_GUI and UNITY_WORKTREE_CACHE_SERVER conditionals,
-# matching the managed block exactly.  The structural tests above couple these
-# runtime assertions to the real script source.
+# Invoke-CacheServerArgFilter replicates the $unityArgs construction and the
+# UNITY_WORKTREE_CACHE_SERVER conditional from the managed block.  The optional
+# $GuiFlagValue parameter simulates starting from a gui-variant arg set (no
+# -batchmode/-nographics) to verify cache-server flags co-exist correctly.
+# The structural tests above couple these runtime assertions to the real script.
 # ---------------------------------------------------------------------------
 Describe 'UNITY_WORKTREE_CACHE_SERVER runtime arg-filter' {
 
@@ -356,6 +319,7 @@ Describe 'UNITY_WORKTREE_CACHE_SERVER runtime arg-filter' {
         $proj      = 'C:\fake\proj'
         $statusDir = 'C:\fake\proj\.unity-mcp'
         $log       = Join-Path $statusDir 'editor.log'
+        # Start with default (headless) args; $GuiFlagValue='1' simulates the gui variant.
         $unityArgs = @(
             '-batchmode', '-nographics',
             '-logFile', $log,

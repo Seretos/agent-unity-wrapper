@@ -162,9 +162,15 @@ start/stop steps.
 
 ### Launch flow
 
-1. `worktree_start` (agent-worktree) runs the `start` step → launches a **headless** Unity
-   (`-batchmode -nographics -projectPath <worktree>`) bound to the worktree, with
-   `UNITY_MCP_STATUS_DIR=<worktree>/.unity-mcp` and
+1. `worktree_start` (agent-worktree) runs the matching `start` step variant:
+   - **`default`** (no variant arg, or `variant=default`): launches a **headless** Unity
+     (`-batchmode -nographics -projectPath <worktree>`) — correct for CI and automated MCP
+     tool calls.
+   - **`gui`** (`variant=gui`): launches a **visible editor** (same flags minus `-batchmode`
+     and `-nographics`) — for interactive editing, visual debugging, or Play-mode with
+     graphics.
+   Both variants set `UNITY_MCP_STATUS_DIR=<worktree>/.unity-mcp`,
+   `UNITY_MCP_ALLOW_BATCH=1`, and
    `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi` to boot the in-editor
    bridge. The launched PID is recorded in `.unity-mcp/unity.pid`.
 2. The bridge writes its status file into the worktree-local `.unity-mcp`; this session's
@@ -179,29 +185,25 @@ the Unity Hub default install path.
 
 By default `worktree_start` boots Unity **headless** (`-batchmode -nographics`), which is
 the correct mode for CI and automated MCP tool calls. When you need a visible editor
-(interactive editing, visual debugging, Play-mode with graphics), set the environment
-variable **before** calling `worktree_start`:
+(interactive editing, visual debugging, Play-mode with graphics), use the named `gui`
+variant:
 
 ```
-$env:UNITY_WORKTREE_GUI = '1'   # PowerShell
-# or
-export UNITY_WORKTREE_GUI=1     # bash / zsh
+worktree_start worktree_id=<id> variant=gui
 ```
 
-This is the **first-class documented switch** — it does **not** require editing the managed
-block in `.seretos/worktree-setup.yml`. When the flag is set, the managed `start:` step
-omits `-batchmode` and `-nographics`, launching a visible editor instead. On Windows the
-existing `Start-Process -PassThru` already detaches the editor from the terminal, so the
-worktree shell remains usable. Trade-off: a visible editor window is created and the full
-editor UI loads, which costs more memory and startup time than headless mode.
+No environment variable is needed. The `gui` start step runs the same launch sequence as
+`default` but omits `-batchmode` and `-nographics`, so a full visible editor window
+appears. On Windows `Start-Process -PassThru` detaches the editor from the terminal, so
+the worktree shell remains usable. Trade-off: a visible editor window is created and the
+full editor UI loads, which costs more memory and startup time than headless mode.
 
-> **Repos prepared before this feature was added:** the `UNITY_WORKTREE_GUI` filter lives
-> inside the managed block written by the prepare-script. If your repo was prepared by an
-> older version of the script, the existing managed block does not contain the filter, so
-> setting `UNITY_WORKTREE_GUI=1` is silently inert. Re-run the prepare-script **with
-> `-Force`** to refresh the managed block, then commit the updated
-> `.seretos/worktree-setup.yml`. A freshly-prepared repo already has the filter and needs
-> no special action.
+> **Repos prepared before named-variant steps were introduced:** the managed block must
+> contain both `name: default` and `name: gui` start steps. If your repo was prepared by
+> an older version of the prepare-script (the block has only a single unnamed start step or
+> still contains `UNITY_WORKTREE_GUI`), re-run the prepare-script **with `-Force`** to
+> refresh the managed block, then commit the updated `.seretos/worktree-setup.yml`. A
+> freshly-prepared repo already has both steps and needs no special action.
 
 ### Cache Server (faster cold starts)
 
@@ -325,10 +327,10 @@ is the time spent copying.
 The robust primary flow is plain `worktree_start` (headless, no extra env vars required):
 call `worktree_start` and poll until the bridge writes its status file into the
 worktree-local `.unity-mcp/` directory. If a visible editor is needed (interactive
-editing, visual debugging, Play-mode with graphics), add `UNITY_WORKTREE_GUI=1` before
-calling `worktree_start` — but GUI mode is an optional variant, not a requirement for
-reliable MCP usage. Mirroring is an optional accelerator applied *before*
-`worktree_start`, not a replacement for the documented launch flow.
+editing, visual debugging, Play-mode with graphics), use `worktree_start variant=gui` —
+but GUI mode is an optional variant, not a requirement for reliable MCP usage. Mirroring
+is an optional accelerator applied *before* `worktree_start`, not a replacement for the
+documented launch flow.
 
 For a durable, infrastructure-backed alternative that survives project-path changes and
 branch switches, see the Cache Server section above.

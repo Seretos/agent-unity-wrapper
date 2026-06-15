@@ -127,6 +127,39 @@ start:
           '-projectPath', $proj,
           '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
       )
+      if ($env:UNITY_WORKTREE_MIRROR_LIBRARY -eq '1') {
+          $gitCommonDir = (& git rev-parse --git-common-dir 2>$null)
+          if ($LASTEXITCODE -eq 0 -and $gitCommonDir) {
+              $gitCommonDirAbs = Convert-Path -LiteralPath $gitCommonDir.Trim() -ErrorAction SilentlyContinue
+              $mainRoot = if ($gitCommonDirAbs) { Split-Path -Parent $gitCommonDirAbs } else { $null }
+              if ([string]::IsNullOrEmpty($mainRoot) -or -not (Test-Path $mainRoot)) {
+                  Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: could not resolve a distinct main checkout (running from main checkout?) - skipping Library mirror"
+              } else {
+                  $lockfile  = Join-Path $mainRoot 'Temp/UnityLockfile'
+                  if (Test-Path $lockfile) {
+                      Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: main checkout Unity is running (lockfile present) - skipping Library mirror"
+                  } else {
+                      $srcLib  = Join-Path $mainRoot 'Library'
+                      $dstLib  = Join-Path $proj 'Library'
+                      if (Test-Path $srcLib) {
+                          Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: mirroring Library from $srcLib -> $dstLib"
+                          if ($IsWindows) {
+                              robocopy $srcLib $dstLib /MIR /MT:16
+                              if ($LASTEXITCODE -gt 7) { throw "robocopy Library mirror failed (exit $LASTEXITCODE)" }
+                          } else {
+                              & rsync -a --delete "$srcLib/" "$dstLib/"
+                              if ($LASTEXITCODE -ne 0) { throw "rsync Library mirror failed (exit $LASTEXITCODE)" }
+                          }
+                          Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: Library mirror complete"
+                      } else {
+                          Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: no Library/ found in main checkout ($srcLib) - skipping"
+                      }
+                  }
+              }
+          } else {
+              Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: could not resolve main checkout via git rev-parse - skipping Library mirror"
+          }
+      }
       if (-not [string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER)) {
           $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
           Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
@@ -169,6 +202,39 @@ start:
           '-projectPath', $proj,
           '-executeMethod', 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
       )
+      if ($env:UNITY_WORKTREE_MIRROR_LIBRARY -eq '1') {
+          $gitCommonDir = (& git rev-parse --git-common-dir 2>$null)
+          if ($LASTEXITCODE -eq 0 -and $gitCommonDir) {
+              $gitCommonDirAbs = Convert-Path -LiteralPath $gitCommonDir.Trim() -ErrorAction SilentlyContinue
+              $mainRoot = if ($gitCommonDirAbs) { Split-Path -Parent $gitCommonDirAbs } else { $null }
+              if ([string]::IsNullOrEmpty($mainRoot) -or -not (Test-Path $mainRoot)) {
+                  Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: could not resolve a distinct main checkout (running from main checkout?) - skipping Library mirror"
+              } else {
+                  $lockfile  = Join-Path $mainRoot 'Temp/UnityLockfile'
+                  if (Test-Path $lockfile) {
+                      Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: main checkout Unity is running (lockfile present) - skipping Library mirror"
+                  } else {
+                      $srcLib  = Join-Path $mainRoot 'Library'
+                      $dstLib  = Join-Path $proj 'Library'
+                      if (Test-Path $srcLib) {
+                          Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: mirroring Library from $srcLib -> $dstLib"
+                          if ($IsWindows) {
+                              robocopy $srcLib $dstLib /MIR /MT:16
+                              if ($LASTEXITCODE -gt 7) { throw "robocopy Library mirror failed (exit $LASTEXITCODE)" }
+                          } else {
+                              & rsync -a --delete "$srcLib/" "$dstLib/"
+                              if ($LASTEXITCODE -ne 0) { throw "rsync Library mirror failed (exit $LASTEXITCODE)" }
+                          }
+                          Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: Library mirror complete"
+                      } else {
+                          Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: no Library/ found in main checkout ($srcLib) - skipping"
+                      }
+                  }
+              }
+          } else {
+              Write-Host "UNITY_WORKTREE_MIRROR_LIBRARY=1: could not resolve main checkout via git rev-parse - skipping Library mirror"
+          }
+      }
       if (-not [string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER)) {
           $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
           Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
@@ -235,8 +301,9 @@ else {
                 $existingBlock = $content.Substring($blockStart, ($blockEnd + $endMarker.Length) - $blockStart)
                 if ($existingBlock -match 'UNITY_WORKTREE_GUI' -or
                     $existingBlock -notmatch 'name: gui' -or
-                    $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER') {
-                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support."
+                    $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER' -or
+                    $existingBlock -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY') {
+                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support and Library mirror support."
                 }
             }
         }

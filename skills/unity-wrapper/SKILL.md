@@ -264,61 +264,55 @@ alternative to the Cache Server path (see above and #7). It is best-effort only 
 may still reimport some or all assets depending on what has changed between the main
 checkout and the worktree branch.
 
-**Precondition: the main-checkout Unity Editor must not be running.** Unity holds an
-exclusive lock on `Library/` while it is open. Check that the lockfile is absent before
-copying:
-
-```
-# Confirm Unity is not running in the main checkout
-ls <main-checkout>/Temp/UnityLockfile   # must NOT exist
-```
-
-(`Temp/UnityLockfile` is the project-open lock Unity writes while an editor instance
-owns that project; it lives under `Temp/`, not `Library/`.)
-
-If the lockfile is present, wait for the editor to close or stop it first (`worktree_stop`
-if it was started by `agent-worktree`; otherwise close the editor window or kill the
-process). Do not copy a `Library/` while Unity holds the lock — partial copies produce
-corrupt import state.
-
-**Copy the `Library/` into the worktree:**
+**To activate it, set `UNITY_WORKTREE_MIRROR_LIBRARY` to `'1'` before calling `worktree_start`:**
 
 ```powershell
-# Windows (PowerShell) — exit codes 0–7 are success for robocopy
-# 0 = nothing to copy, 1 = files copied, 3 = files copied + extras deleted, 8+ = error
-robocopy <main-checkout>\Library <worktree>\Library /MIR /MT:16
+$env:UNITY_WORKTREE_MIRROR_LIBRARY = '1'
 ```
 
-```bash
-# POSIX (bash / zsh)
-rsync -a --delete <main-checkout>/Library/ <worktree>/Library/
+Then call the `worktree_start` MCP tool (with optional `variant=gui` for a visible editor).
+After `worktree_start` returns, clear the variable if you do not want subsequent starts to mirror:
+
+```powershell
+Remove-Item Env:UNITY_WORKTREE_MIRROR_LIBRARY -ErrorAction SilentlyContinue
 ```
+
+The managed `start:` block written by `prepare-unity-worktree.ps1` checks this env var
+automatically. When set to `1`, it:
+
+1. Resolves the main checkout root via `git rev-parse --git-common-dir` (works from
+   inside any worktree without baking in an absolute path).
+2. Checks `<main-checkout>/Temp/UnityLockfile` — if the lockfile is present the mirror is
+   skipped with a log message and Unity starts normally (no throw). Do not mirror while
+   the main-checkout editor is running; partial copies produce corrupt import state.
+3. Copies `<main-checkout>/Library/` into the worktree's `Library/` using
+   `robocopy /MIR /MT:16` on Windows or `rsync -a --delete` on POSIX.
+4. Proceeds to launch the Unity Editor as usual.
+
+If `UNITY_WORKTREE_MIRROR_LIBRARY` is unset or empty the step is skipped entirely — no
+change in behaviour for repos that do not opt in.
 
 > **robocopy exit-code note:** robocopy uses non-standard exit codes. Exit code 1 means
 > files were copied successfully (not an error). Exit codes 0–7 all indicate success;
-> code 8 and above indicate a real error. If you are checking `$LASTEXITCODE` in
-> PowerShell, treat any value ≤ 7 as success.
+> code 8 and above indicate a real error. The managed step treats any exit code ≤ 7 as
+> success and throws on 8 or above.
 
 **Stale-lockfile trap (force-killed editor):** if a previous editor run in the
 **worktree** was killed forcefully, it may have left a stale lockfile at
 `<worktree>/Temp/UnityLockfile`. Unity refuses to open the project while this file
-exists, logging `HandleProjectAlreadyOpenInAnotherInstance`. Delete it before calling
-`worktree_start`:
-
-```
-Remove-Item <worktree>\Temp\UnityLockfile -ErrorAction SilentlyContinue  # PowerShell
-# or
-rm -f <worktree>/Temp/UnityLockfile                                       # bash / zsh
-```
+exists, logging `HandleProjectAlreadyOpenInAnotherInstance`. The managed `start:` block
+does not automatically clear the worktree lockfile — remove it manually before calling
+`worktree_start` if the previous run was force-killed.
 
 **Honest caveat — this is best-effort, not guaranteed.** Real-world outcomes vary
 depending on how much has changed since the mirrored `Library/` was built:
 
 - Case #81 (branch-only delta, same project path): mirroring eliminated the cold import
   entirely — Unity opened and the bridge reported `ready` without reimporting.
-- Case #86 (new project path): `Library/ArtifactDB` was invalidated because the stored
-  import metadata references the old absolute path; Unity performed a full reimport
-  anyway.
+- Case #86 (new project path / cross-drive): best-effort, can also work cross-drive
+  (observed on Unity 2022.3.62f3) — measure rather than assume. `Library/ArtifactDB`
+  stores absolute paths so a path change may still trigger a full reimport; whether it
+  does depends on the Unity version and import cache state.
 
 Mirroring may help or may not, depending on how much has changed since the `Library/`
 was built. When it works, it can save several minutes; when it does not, the only cost
@@ -329,8 +323,16 @@ call `worktree_start` and poll until the bridge writes its status file into the
 worktree-local `.unity-mcp/` directory. If a visible editor is needed (interactive
 editing, visual debugging, Play-mode with graphics), use `worktree_start variant=gui` —
 but GUI mode is an optional variant, not a requirement for reliable MCP usage. Mirroring
-is an optional accelerator applied *before* `worktree_start`, not a replacement for the
-documented launch flow.
+is an optional accelerator applied *before* `worktree_start` (by the managed start step),
+not a replacement for the documented launch flow.
+
+> **Repos prepared before this feature was added:** the `UNITY_WORKTREE_MIRROR_LIBRARY`
+> conditional lives inside the managed block written by the prepare-script. If your repo
+> was prepared by an older version of the script, the existing managed block does not
+> contain the conditional, so setting `UNITY_WORKTREE_MIRROR_LIBRARY=1` is silently
+> inert. Re-run the prepare-script **with `-Force`** to refresh the managed block, then
+> commit the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo already has
+> the conditional and needs no special action.
 
 For a durable, infrastructure-backed alternative that survives project-path changes and
 branch switches, see the Cache Server section above.

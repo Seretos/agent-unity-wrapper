@@ -160,6 +160,14 @@ worktree is a checkout of the same repo, the tracked files it writes inherit to 
 worktree — so you prepare once, not per worktree. Requires PowerShell 7+ for the launched
 start/stop steps.
 
+> **Stale managed block.** If the managed block exists but was written by an older version
+> of the prepare-script, it may be missing the `UNITY_WORKTREE_CACHE_SERVER` conditional,
+> the `UNITY_WORKTREE_MIRROR_LIBRARY` conditional, or the `COLD START:` hint. In that
+> state, setting those env vars is **silently inert** — the block ignores them. The
+> prepare-script warns when it detects this. Re-run with `-Force` to refresh the managed
+> block, then commit the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo
+> already has all conditionals and needs no special action.
+
 ### Launch flow
 
 1. `worktree_start` (agent-worktree) runs the matching `start` step variant:
@@ -173,13 +181,53 @@ start/stop steps.
    `UNITY_MCP_ALLOW_BATCH=1`, and
    `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi` to boot the in-editor
    bridge. The launched PID is recorded in `.unity-mcp/unity.pid`.
-2. The bridge writes its status file into the worktree-local `.unity-mcp`; this session's
-   MCP server (pointed at the same dir) discovers the one instance and auto-connects.
+2. The bridge writes its status file (`unity-mcp-status-*.json`) into the worktree-local
+   `.unity-mcp/` status dir. The appearance of any `unity-mcp-status-*.json` file in
+   that directory is the authoritative readiness signal — once it exists, the bridge is
+   up. This session's MCP server (pointed at the same dir) discovers the one instance
+   and auto-connects.
 3. `worktree_stop` runs the `stop` step → kills the recorded Unity PID.
 
 Set `UNITY_EDITOR_PATH` to your Unity Editor binary to override editor resolution; if unset,
 the start step derives the version from `ProjectSettings/ProjectVersion.txt` and looks under
 the Unity Hub default install path.
+
+### Cold-start expectations & acceleration
+
+On a fresh worktree with no `Library/` and no acceleration active, Unity must re-import
+every asset from scratch. **Expected duration: 5–65 min on asset-heavy projects** — plan
+accordingly before calling `worktree_start`.
+
+To reduce or eliminate the cold-import cost, set one or both of the following environment
+variables **before** calling `worktree_start`:
+
+| Env var | What it does | When to use |
+|---|---|---|
+| `UNITY_WORKTREE_CACHE_SERVER=<host:port>` | Connects Unity to a Cache Server / Accelerator; already-built artefacts are served from the cache instead of reimporting | **Fastest** — requires a running server (see "Cache Server" section) |
+| `UNITY_WORKTREE_MIRROR_LIBRARY=1` | Copies the main checkout's `Library/` into the worktree before opening Unity | **No server needed** — best-effort, see "Warm-start: Mirror Main Library" section |
+
+When neither variable is set the managed start step emits a `COLD START:` warning so the
+wait time is expected rather than a surprise.
+
+> **Windows Defender exclusions.** On Windows, Defender's real-time scanning can roughly
+> double the import time by scanning every asset file as Unity writes it. To halve the
+> overhead, add the following paths to the Windows Defender exclusion list (Settings →
+> Windows Security → Virus & threat protection → Exclusions):
+>
+> - **Worktree-store root** — the directory that holds all your agent worktrees.
+> - **Unity install path** — the directory containing the Unity Editor binary (e.g.
+>   `C:\Program Files\Unity\Hub\Editor\<version>`).
+> - **Unity editor process** — the `Unity.exe` process.
+>
+> No PowerShell commands are provided here; add these exclusions manually through the
+> Windows Security UI or your organisation's endpoint management tool.
+
+> **Cross-drive caveat (Case #86).** If the worktree-store is on a different drive or
+> path from the main checkout, `Library/ArtifactDB`'s stored absolute paths are
+> invalidated and the Library mirror may still trigger a full reimport despite the copy.
+> In that case prefer `UNITY_WORKTREE_CACHE_SERVER` (the Cache Server path is immune to
+> project-path changes). See "Warm-start: Mirror Main Library" for the full Case #86
+> details.
 
 ### GUI / interactive launch
 
@@ -271,6 +319,12 @@ CI host is a separate step — see
 [Unity Accelerator docs](https://docs.unity3d.com/Manual/UnityAccelerator.html) and
 [Cache Server docs](https://docs.unity3d.com/Manual/CacheServer.html) upstream.
 
+> **Cross-drive advantage.** Unlike the Library mirror, the Cache Server path is immune
+> to project-path and cross-drive changes — `Library/ArtifactDB` path invalidation does
+> not affect cache-server imports. If the worktree-store is on a different drive from the
+> main checkout, the Cache Server is the more reliable acceleration choice. See the
+> cross-drive callout at the top of the "Warm-start: Mirror Main Library" section below.
+
 > **Repos prepared before this feature was added:** the `UNITY_WORKTREE_CACHE_SERVER`
 > conditional lives inside the managed block written by the prepare-script. If your repo
 > was prepared by an older version of the script, the existing managed block does not
@@ -280,6 +334,15 @@ CI host is a separate step — see
 > conditional and needs no special action.
 
 ### Warm-start: Mirror Main Library
+
+> **Cross-drive / cross-path caveat (Case #86).** `Library/ArtifactDB` stores absolute
+> paths internally. If the worktree-store is on a different drive or at a different root
+> path from the main checkout, those stored paths are invalidated and the mirror may still
+> trigger a full reimport despite the copy — best-effort, can also work cross-drive
+> (observed on Unity 2022.3.62f3), so measure rather than assume. When the worktree-store
+> and main checkout are on different drives, prefer `UNITY_WORKTREE_CACHE_SERVER` (the
+> Cache Server path is immune to project-path changes). See the "Cache Server (faster cold
+> starts)" section above.
 
 When a Unity Cache Server or Accelerator is not available, you can reduce cold-import
 time by pre-populating a new worktree's `Library/` from the main checkout before
@@ -333,22 +396,22 @@ depending on how much has changed since the mirrored `Library/` was built:
 
 - Case #81 (branch-only delta, same project path): mirroring eliminated the cold import
   entirely — Unity opened and the bridge reported `ready` without reimporting.
-- Case #86 (new project path / cross-drive): best-effort, can also work cross-drive
-  (observed on Unity 2022.3.62f3) — measure rather than assume. `Library/ArtifactDB`
-  stores absolute paths so a path change may still trigger a full reimport; whether it
-  does depends on the Unity version and import cache state.
+- Case #86 (new project path / cross-drive): see the cross-drive callout at the top of
+  this section — measure rather than assume, and prefer Cache Server when drives differ.
 
 Mirroring may help or may not, depending on how much has changed since the `Library/`
 was built. When it works, it can save several minutes; when it does not, the only cost
 is the time spent copying.
 
 The robust primary flow is plain `worktree_start` (headless, no extra env vars required):
-call `worktree_start` and poll until the bridge writes its status file into the
-worktree-local `.unity-mcp/` directory. If a visible editor is needed (interactive
-editing, visual debugging, Play-mode with graphics), use `worktree_start variant=gui` —
-but GUI mode is an optional variant, not a requirement for reliable MCP usage. Mirroring
-is an optional accelerator applied *before* `worktree_start` (by the managed start step),
-not a replacement for the documented launch flow.
+call `worktree_start` and poll until a `unity-mcp-status-*.json` file appears in the
+worktree-local `.unity-mcp/` directory — this is the authoritative readiness signal,
+preferred over parsing `editor.log` for the `StartStdioForCi` banner. If a visible
+editor is needed (interactive editing, visual debugging, Play-mode with graphics), use
+`worktree_start variant=gui` — but GUI mode is an optional variant, not a requirement
+for reliable MCP usage. Mirroring is an optional accelerator applied *before*
+`worktree_start` (by the managed start step), not a replacement for the documented launch
+flow.
 
 > **Repos prepared before this feature was added:** the `UNITY_WORKTREE_MIRROR_LIBRARY`
 > conditional lives inside the managed block written by the prepare-script. If your repo

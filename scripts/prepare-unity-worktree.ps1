@@ -164,6 +164,7 @@ start:
           $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
           Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
       }
+      if ([string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER) -and $env:UNITY_WORKTREE_MIRROR_LIBRARY -ne '1') { Write-Host "COLD START: No acceleration active. Cold import on an asset-heavy project can take 5-65 min. Set UNITY_WORKTREE_CACHE_SERVER=<host:port> (fastest) or UNITY_WORKTREE_MIRROR_LIBRARY=1 (no server needed). On Windows, add the worktree-store root and Unity install path to Windows Defender exclusions to halve scan overhead." }
       $p = Start-Process -FilePath $editor -ArgumentList $unityArgs -PassThru
       Set-Content -Path (Join-Path $statusDir 'unity.pid') -Value $p.Id
       Write-Host "Unity bridge launched headless (pid $($p.Id)) -> $statusDir"
@@ -241,6 +242,7 @@ start:
           $unityArgs += @('-EnableCacheServer', '-cacheServerEndpoint', $env:UNITY_WORKTREE_CACHE_SERVER)
           Write-Host "UNITY_WORKTREE_CACHE_SERVER=$($env:UNITY_WORKTREE_CACHE_SERVER): enabling asset cache server"
       }
+      if ([string]::IsNullOrWhiteSpace($env:UNITY_WORKTREE_CACHE_SERVER) -and $env:UNITY_WORKTREE_MIRROR_LIBRARY -ne '1') { Write-Host "COLD START: No acceleration active. Cold import on an asset-heavy project can take 5-65 min. Set UNITY_WORKTREE_CACHE_SERVER=<host:port> (fastest) or UNITY_WORKTREE_MIRROR_LIBRARY=1 (no server needed). On Windows, add the worktree-store root and Unity install path to Windows Defender exclusions to halve scan overhead." }
       $p = Start-Process -FilePath $editor -ArgumentList $unityArgs -PassThru
       Set-Content -Path (Join-Path $statusDir 'unity.pid') -Value $p.Id
       Write-Host "Unity bridge launched with visible editor (pid $($p.Id)) -> $statusDir"
@@ -305,8 +307,9 @@ else {
                     $existingBlock -notmatch 'name: gui' -or
                     $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER' -or
                     $existingBlock -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' -or
-                    $existingBlock -notmatch 'UNITY_MCP_ALLOW_BATCH=1 does not suppress') {
-                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support or GUI-mode dialog caveat). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support and Library mirror support and the GUI-mode dialog caveat."
+                    $existingBlock -notmatch 'UNITY_MCP_ALLOW_BATCH=1 does not suppress' -or
+                    $existingBlock -notmatch 'COLD START') {
+                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support or GUI-mode dialog caveat or cold-start hint). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support and Library mirror support and the GUI-mode dialog caveat and cold-start acceleration hints."
                 }
             }
         }

@@ -198,12 +198,36 @@ appears. On Windows `Start-Process -PassThru` detaches the editor from the termi
 the worktree shell remains usable. Trade-off: a visible editor window is created and the
 full editor UI loads, which costs more memory and startup time than headless mode.
 
+> **Warning — blocking modal dialogs in GUI mode.** In a visible editor (`variant=gui`),
+> Unity can display blocking modal dialogs when the MCP triggers a save operation — for
+> example "Scene(s) Have Been Modified", overwrite confirmations, or "Auto Save disabled".
+> These modals halt Unity's main thread (which is also where the bridge runs), causing all
+> in-flight MCP calls to hang until a human dismisses them. `UNITY_MCP_ALLOW_BATCH=1` is
+> set by the managed block but does **not** suppress `EditorUtility.DisplayDialog` in GUI
+> mode (it only affects Play-mode dialogs). For unattended automation, always use the
+> `default` (headless) variant. See "Headless vs. GUI — automation workflow" below.
+
 > **Repos prepared before named-variant steps were introduced:** the managed block must
 > contain both `name: default` and `name: gui` start steps. If your repo was prepared by
 > an older version of the prepare-script (the block has only a single unnamed start step or
 > still contains `UNITY_WORKTREE_GUI`), re-run the prepare-script **with `-Force`** to
 > refresh the managed block, then commit the updated `.seretos/worktree-setup.yml`. A
 > freshly-prepared repo already has both steps and needs no special action.
+
+### Headless vs. GUI — automation workflow
+
+- **Headless is the correct mode for all automated and agent-driven phases.** In
+  `-batchmode`, `EditorUtility.DisplayDialog` returns its default value immediately with
+  no UI, so save operations complete without blocking. Automated MCP tool calls run
+  without human intervention.
+- **GUI mode is for human review only.** MCP-triggered save operations (scene saves,
+  asset writes, etc.) can produce blocking modal dialogs that halt Unity's main thread and
+  hang all in-flight MCP calls until a human dismisses the dialog.
+- **Recommended workflow:** run headless for all automated or agent-driven phases →
+  `worktree_stop` → relaunch with `variant=gui` for human review → `worktree_stop` the
+  GUI instance before resuming automated work.
+- The long-term fix (non-interactive bridge save APIs) is an upstream
+  `CoplayDev/unity-mcp` concern and is tracked separately.
 
 ### Cache Server (faster cold starts)
 
@@ -364,3 +388,9 @@ branch switches, see the Cache Server section above.
    (`${CLAUDE_PROJECT_DIR}/.unity-mcp` on Claude, cwd-relative `.unity-mcp` on Codex) — it
    enables per-worktree status-dir isolation (see "Per-worktree Unity instances"), not a
    hardcoded path.
+
+5. **Raw `Unity.exe` start is invisible to this session's MCP server.** Launching the
+   editor directly does not set `UNITY_MCP_STATUS_DIR`, so the bridge writes its status
+   file into the global `~/.unity-mcp` instead of the worktree-local `.unity-mcp`. This
+   session's MCP server finds no instance and all tool calls fail silently. Always start
+   via `worktree_start`.

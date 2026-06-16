@@ -94,6 +94,12 @@ Describe 'prepare-unity-worktree.ps1 — managed block content' {
         $guiSection | Should Not Match 'batchmode'
     }
 
+    It 'managed block gui step contains GUI-mode dialog caveat comment' {
+        $afterGui   = ($global:puw_managedBlock -split 'name: gui')[1]
+        $guiSection = ($afterGui -split 'stop:')[0]
+        $guiSection | Should Match 'does not suppress'
+    }
+
     It 'managed block does not contain UNITY_WORKTREE_GUI' {
         $global:puw_managedBlock | Should Not Match 'UNITY_WORKTREE_GUI'
     }
@@ -460,6 +466,24 @@ Describe 'prepare-unity-worktree.ps1 — idempotency stale-block (Library mirror
             $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' }) -join "`n"
             Write-Utf8NoBom -Path $setupPath -Content $stripped
 
+            $wv = $null
+            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
+            ($wv | Out-String) | Should Match '-Force'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+}
+
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 — idempotency stale-block (GUI dialog caveat)' {
+
+    It 'Fix-2b-gui-dialog: emits a Write-Warning hint when existing block lacks GUI dialog caveat' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+            $content = Get-Content -LiteralPath $setupPath -Raw
+            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'does not suppress' }) -join "`n"
+            Write-Utf8NoBom -Path $setupPath -Content $stripped
             $wv = $null
             & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
             ($wv | Out-String) | Should Match '-Force'

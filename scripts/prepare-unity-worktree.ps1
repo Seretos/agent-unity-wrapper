@@ -196,6 +196,8 @@ start:
       # and auto-connects with no UI step.
       $env:UNITY_MCP_STATUS_DIR = $statusDir
       $env:UNITY_MCP_ALLOW_BATCH = '1'
+      # GUI mode: UNITY_MCP_ALLOW_BATCH=1 does not suppress EditorUtility.DisplayDialog;
+      # use the default (headless) variant for unattended automation.
       $log = Join-Path $statusDir 'editor.log'
       $unityArgs = @(
           '-logFile', $log,
@@ -302,8 +304,9 @@ else {
                 if ($existingBlock -match 'UNITY_WORKTREE_GUI' -or
                     $existingBlock -notmatch 'name: gui' -or
                     $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER' -or
-                    $existingBlock -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY') {
-                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support and Library mirror support."
+                    $existingBlock -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' -or
+                    $existingBlock -notmatch 'UNITY_MCP_ALLOW_BATCH=1 does not suppress') {
+                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support or GUI-mode dialog caveat). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support and Library mirror support and the GUI-mode dialog caveat."
                 }
             }
         }

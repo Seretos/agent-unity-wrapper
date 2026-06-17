@@ -60,6 +60,12 @@ the upstream `CoplayDev/unity-mcp` server.
 
 ## Patterns and recipes
 
+> **Visual verification mandate.** For UI/scene tickets, capturing and inspecting a
+> screenshot in Play mode is part of the definition of done — it is not optional. Compile
+> success, zero wire-warnings, and a Codex correctness review verify code structure, not
+> whether data-bindings render visible content, badges are positioned correctly, or
+> progress bars update at runtime. See "Capture a screenshot for visual verification" below.
+
 ### Inspect the scene hierarchy
 
 1. Use the **scene inspection** tool to list open scenes and confirm which scene is active.
@@ -102,6 +108,84 @@ the upstream `CoplayDev/unity-mcp` server.
    editor has transitioned.
 3. Perform any play-mode-specific queries (e.g. reading runtime component values).
 4. Use **play-mode control** to exit Play mode before making any scene edits.
+
+### Capture a screenshot for visual verification
+
+For UI/scene tickets, capturing a screenshot in Play mode is part of the definition of done.
+Compile success, zero wire-warnings, and static review verify code structure only — they do
+not verify that data-bindings render visible content or that layout is correct at runtime.
+Before marking a UI ticket done, capture a screenshot and inspect it visually.
+
+**Prerequisites:** Unity must be running under `variant=gui` (not headless). In headless
+mode (`-batchmode -nographics`), `ScreenCapture.CaptureScreenshot` produces no output and
+the display subsystem is not initialized, so the RenderTexture path also produces a blank
+image on headless configurations without a display subsystem. Boot with
+`worktree_start variant=gui` before executing the recipe below.
+
+**Recipe — execute via `execute_code`:**
+
+````csharp
+// Visual verification screenshot — execute in Play mode via the Unity MCP execute_code tool.
+// Output path: <worktree>/.unity-mcp/screenshot.png
+// Run AFTER entering Play mode and waiting for the scene to finish loading.
+
+// 1. Resolve output path into the worktree-local status dir (always present when the bridge is up).
+string statusDir = System.Environment.GetEnvironmentVariable("UNITY_MCP_STATUS_DIR");
+if (string.IsNullOrEmpty(statusDir))
+    statusDir = System.IO.Path.Combine(UnityEngine.Application.dataPath, "..", ".unity-mcp");
+string outputPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(statusDir, "screenshot.png"));
+
+// 2. Capture via RenderTexture + ReadPixels. Requires GUI mode — see prerequisites above;
+//    headless (-nographics) yields a blank image.
+int width  = UnityEngine.Screen.width  > 0 ? UnityEngine.Screen.width  : 1920;
+int height = UnityEngine.Screen.height > 0 ? UnityEngine.Screen.height : 1080;
+
+UnityEngine.RenderTexture rt = new UnityEngine.RenderTexture(width, height, 24);
+UnityEngine.Camera cam = UnityEngine.Camera.main ?? UnityEngine.Object.FindObjectOfType<UnityEngine.Camera>();
+if (cam == null) throw new System.Exception("No camera found in scene.");
+
+UnityEngine.RenderTexture prev = cam.targetTexture;
+cam.targetTexture = rt;
+cam.Render();
+
+UnityEngine.RenderTexture.active = rt;
+UnityEngine.Texture2D tex = new UnityEngine.Texture2D(width, height, UnityEngine.TextureFormat.RGB24, false);
+tex.ReadPixels(new UnityEngine.Rect(0, 0, width, height), 0, 0);
+tex.Apply();
+
+// Restore state.
+cam.targetTexture = prev;
+UnityEngine.RenderTexture.active = null;
+UnityEngine.Object.DestroyImmediate(rt);
+
+// 3. Write PNG.
+System.IO.File.WriteAllBytes(outputPath, tex.EncodeToPNG());
+UnityEngine.Object.DestroyImmediate(tex);
+
+UnityEngine.Debug.Log($"[VisualVerify] Screenshot saved: {outputPath}");
+````
+
+**Step-by-step workflow:**
+
+1. Boot with `worktree_start variant=gui` (GUI mode is required — see prerequisite above).
+2. Wait for `unity-mcp-status-*.json` to appear in `.unity-mcp/` (bridge ready signal).
+3. Enter Play mode via play-mode control and wait for the transition to complete.
+4. Allow the scene one or two frames to finish its startup sequence (if the project has a
+   loading screen, wait for it to resolve — inspect a known UI element's active state via
+   component read if you need to gate on scene readiness).
+5. Execute the code block above via script / console access (`execute_code`).
+6. Read the path from the Debug.Log console output (`[VisualVerify] Screenshot saved: ...`) and inspect the image at `<worktree>/.unity-mcp/screenshot.png`.
+7. Exit Play mode before making any structural edits.
+
+> **GUI mode — dismiss blocking dialogs first.** Because this recipe runs exclusively
+> in GUI mode, blocking modal dialogs can hang in-flight MCP calls until a human
+> dismisses them. Dismiss any open dialogs before executing the code block above.
+> See "GUI / interactive launch" for the full warning.
+
+**Output path convention:** `<worktree>/.unity-mcp/screenshot.png`. The `.unity-mcp/`
+directory is always present when the bridge is up (it is the status dir), so no directory
+creation step is needed. Overwriting a previous capture is intentional — rename if you
+need to retain multiple captures.
 
 ## Per-worktree Unity instances (worktree gate)
 
@@ -457,3 +541,13 @@ branch switches, see the Cache Server section above.
    file into the global `~/.unity-mcp` instead of the worktree-local `.unity-mcp`. This
    session's MCP server finds no instance and all tool calls fail silently. Always start
    via `worktree_start`.
+
+6. **Test Runner can freeze the editor — use screenshot-based verification instead.**
+   On some Unity projects the Test Runner triggers a SQLite flush or a domain reload that
+   hangs the editor process. If `run_tests` freezes or the editor becomes unresponsive
+   during a test run, do not retry it: kill the Unity process, remove the stale
+   `<worktree>/Temp/UnityLockfile`, and restart with `worktree_start`. A cold-start
+   Library re-import takes roughly 5–65 min depending on project size (see "Cold-start
+   expectations & acceleration"). For UI/scene tickets, replace the `run_tests` step with
+   the screenshot-capture recipe above — compile success + zero wire-warnings + a visual
+   inspection of the screenshot is a sufficient definition of done.

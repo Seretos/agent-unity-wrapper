@@ -361,6 +361,36 @@ full editor UI loads, which costs more memory and startup time than headless mod
 - The long-term fix (non-interactive bridge save APIs) is an upstream
   `CoplayDev/unity-mcp` concern and is tracked separately.
 
+### Standalone build (build-only, not MCP-connected)
+
+A standalone build is a **third mode** alongside headless MCP and GUI. Unlike
+those two, it is **not** MCP-connected: the project's own build script (e.g.
+`build.ps1`) launches Unity as a separate `-batchmode -quit` process that writes
+the artifact and exits cleanly. It obeys the **same exclusive-lockfile rule** as
+the other two modes.
+
+**Lockfile rule.** Unity holds an exclusive lock on `Temp/UnityLockfile` per
+project path. Only one editor process — headless MCP, GUI, **or** a standalone
+build — can own a worktree at a time. A second process fails immediately, logging
+`HandleProjectAlreadyOpenInAnotherInstance` ("Multiple Unity instances cannot
+open the same project").
+
+**Recipe — run a standalone build while a session is active:**
+
+1. `worktree_stop` — terminate the running MCP or GUI session to release the
+   lockfile.
+2. Run your standalone build script (the separate `-batchmode -quit` process
+   writes the artifact and exits, releasing the lock).
+3. `worktree_start variant=gui` (or `default`) — bring the editor back up
+   afterwards if you need to continue working.
+
+> **Disambiguating the two lockfile-error cases:** the error
+> `HandleProjectAlreadyOpenInAnotherInstance` appears in two distinct situations.
+> Here it means an *active* session legitimately holds the lock — resolve it with
+> `worktree_stop` as shown above. If the error appears after a force-killed
+> editor with *no* active session, the cause is a *stale* `Temp/UnityLockfile`
+> left behind — see the **"Stale-lockfile trap"** note below for that case.
+
 ### Cache Server (faster cold starts)
 
 On asset-heavy projects, `worktree_start` triggers a full asset re-import into the

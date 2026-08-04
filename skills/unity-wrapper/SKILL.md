@@ -60,11 +60,10 @@ the upstream `CoplayDev/unity-mcp` server.
 
 ## Patterns and recipes
 
-> **Visual verification mandate.** For UI/scene tickets, capturing and inspecting a
-> screenshot in Play mode is part of the definition of done — it is not optional. Compile
-> success, zero wire-warnings, and a Codex correctness review verify code structure, not
-> whether data-bindings render visible content, badges are positioned correctly, or
-> progress bars update at runtime. See "Capture a screenshot for visual verification" below.
+Play-mode screenshots are available as a capability: with Unity booted under
+`worktree_start variant=gui`, an agent can capture the running scene to
+`<worktree>/.unity-mcp/screenshot.png`. Capture one when a human will want to see the
+result. See "Capture a screenshot from Play mode" below.
 
 ### Inspect the scene hierarchy
 
@@ -109,12 +108,11 @@ the upstream `CoplayDev/unity-mcp` server.
 3. Perform any play-mode-specific queries (e.g. reading runtime component values).
 4. Use **play-mode control** to exit Play mode before making any scene edits.
 
-### Capture a screenshot for visual verification
+### Capture a screenshot from Play mode
 
-For UI/scene tickets, capturing a screenshot in Play mode is part of the definition of done.
-Compile success, zero wire-warnings, and static review verify code structure only — they do
-not verify that data-bindings render visible content or that layout is correct at runtime.
-Before marking a UI ticket done, capture a screenshot and inspect it visually.
+The Unity MCP can capture a screenshot of the running scene from Play mode. Capture one
+when a human will want to see the result — for example, when the runtime appearance of a
+UI or scene change is worth showing.
 
 **Prerequisites:** Unity must be running under `variant=gui` (not headless). In headless
 mode (`-batchmode -nographics`), `ScreenCapture.CaptureScreenshot` produces no output and
@@ -572,12 +570,11 @@ branch switches, see the Cache Server section above.
    session's MCP server finds no instance and all tool calls fail silently. Always start
    via `worktree_start`.
 
-6. **Test Runner can freeze the editor — use screenshot-based verification instead.**
+6. **Test Runner can freeze the editor.**
    On some Unity projects the Test Runner triggers a SQLite flush or a domain reload that
    hangs the editor process. If `run_tests` freezes or the editor becomes unresponsive
    during a test run, do not retry it: kill the Unity process, remove the stale
    `<worktree>/Temp/UnityLockfile`, and restart with `worktree_start`. A cold-start
    Library re-import takes roughly 5–65 min depending on project size (see "Cold-start
-   expectations & acceleration"). For UI/scene tickets, replace the `run_tests` step with
-   the screenshot-capture recipe above — compile success + zero wire-warnings + a visual
-   inspection of the screenshot is a sufficient definition of done.
+   expectations & acceleration"). If the Test Runner remains unusable on a project, find
+   another way to run its tests.

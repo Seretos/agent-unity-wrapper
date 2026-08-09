@@ -548,11 +548,26 @@ branch switches, see the Cache Server section above.
 
 ## Pitfalls
 
-1. **Unity-side bridge is a hard prerequisite.** The `MCP For Unity` C# package must be
-   installed in the target Unity project (Package Manager → Add package by git URL:
-   `https://github.com/CoplayDev/unity-mcp.git`) and the Unity editor must be **open
-   and running** before any tool call is made. If the bridge is absent or the editor is
-   closed, the Python server cannot connect and every call will error.
+1. **Unity-side bridge is a hard prerequisite — but a failed call is recoverable
+   in-session.** The `MCP For Unity` C# package must be installed in the target Unity
+   project (Package Manager → Add package by git URL:
+   `https://github.com/CoplayDev/unity-mcp.git`), and the Unity editor must be open and
+   running for a tool call to succeed. If the editor is not running, the call fails with:
+   `No Unity Editor instances found. Please ensure Unity is running with MCP for Unity bridge.`
+   **This is not fatal to the session.** The Python server rediscovers Unity instances by
+   rescanning `UNITY_MCP_STATUS_DIR` on **every call** — only the status *directory* is
+   fixed when the server starts, never a particular editor instance. So:
+   - **On that error →** run `worktree_start`, wait for a `unity-mcp-status-*.json` file
+     to appear in `<worktree>/.unity-mcp/` (the readiness signal described under "Launch
+     flow"), then **retry the same call**.
+   - **No session restart, no host reconnect, no re-adding the MCP server.** A Unity that
+     dropped and came back is picked up the same way — the upstream `refresh_unity` tool
+     reports `recovered_from_disconnect: true` in that case.
+   The tool list is a **static** server-side definition: `unityMCP`'s tools appear whether
+   or not Unity is reachable. Seeing the tools does not mean the bridge is up, and a
+   failing call does not mean the tool is missing — it means the bridge is unreachable
+   *right now*. The one thing that genuinely cannot be fixed by retrying is a status-dir
+   mismatch — see "Status-dir isolation contract" and Pitfall 5.
 
 2. **Edit mode vs. Play mode.** Some tools (especially component writes and scene saves)
    behave differently or are outright unavailable while the editor is in Play mode.
@@ -577,7 +592,11 @@ branch switches, see the Cache Server section above.
 5. **Raw `Unity.exe` start is invisible to this session's MCP server.** Launching the
    editor directly does not set `UNITY_MCP_STATUS_DIR`, so the bridge writes its status
    file into the global `~/.unity-mcp` instead of the worktree-local `.unity-mcp`. This
-   session's MCP server finds no instance and all tool calls fail silently. Always start
+   session's MCP server finds no instance and every tool call fails with the same
+   `No Unity Editor instances found. Please ensure Unity is running with MCP for Unity bridge.`
+   error as in Pitfall 1 — but unlike the ordinary case, **retrying will keep failing** no
+   matter how long Unity has been up, because the bridge wrote its status file to the
+   wrong directory. Stop the raw editor and restart it via `worktree_start`. Always start
    via `worktree_start`.
 
 6. **Test Runner can freeze the editor.**

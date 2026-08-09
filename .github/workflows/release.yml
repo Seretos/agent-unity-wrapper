@@ -83,6 +83,10 @@ jobs:
           # description.md ships onto the orphan release branch so the dispatch
           # payload's description_url resolves at the tagged commit.
           [ -f description.md ] && cp -a description.md "$STAGE/" || true
+          # .gitattributes ships onto the orphan release branch so a Windows
+          # install (core.autocrlf=true) checks out SKILL.md with LF; Claude
+          # Code silently ignores CRLF skill/instruction files.
+          [ -f .gitattributes ] && cp .gitattributes "$STAGE/" || true
 
           mkdir -p dist
           ZIPNAME="agent-unity-wrapper-${{ inputs.version }}.zip"

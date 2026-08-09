@@ -13,7 +13,8 @@
   prepare once at repo level, not per worktree. Commit the changes afterwards.
 
   The script only fills gaps and never clobbers an existing, foreign configuration.
-  Re-running it is a no-op once the repo is fully prepared.
+  Re-running it is a no-op once the repo is fully prepared. An existing managed
+  block is never rewritten once present, even with -Force.
 
   What it ensures:
     1. `.seretos/worktree-setup.yml` carries a managed `start:`/`stop:` block with two
@@ -37,8 +38,12 @@
   the MCP server pin in the plugin manifests.
 
 .PARAMETER Force
-  Allow rewriting the managed block and flipping `isolation` to `full` when an existing
-  contract conflicts. Without it, conflicts are reported and left untouched.
+  Allow flipping `isolation` to `full` when appending the managed block to a contract
+  that has no `start:`/`stop:` yet, and reconciling a mismatched `com.coplaydev.unity-mcp`
+  pin in `Packages/manifest.json`. Without it, those conflicts are reported and left
+  untouched. -Force does NOT rewrite an existing managed block - no option does. Once a
+  managed block is present, it is left alone; a stale block is reported with the current
+  template printed for manual merge instead.
 
 .NOTES
   Requires PowerShell 7+ for the launched start/stop steps (they run via `shell: pwsh`).
@@ -286,31 +291,23 @@ if (-not (Test-Path $setupPath)) {
 else {
     $content = Get-Content -LiteralPath $setupPath -Raw
     if ($content -match [regex]::Escape($startMarker)) {
-        if ($Force) {
-            # Literal splice: replace everything from the start marker through the end marker.
-            $sIdx = $content.IndexOf($startMarker)
-            $eIdx = $content.IndexOf($endMarker, $sIdx)
-            if ($sIdx -ge 0 -and $eIdx -ge 0) {
-                $eEnd = $eIdx + $endMarker.Length
-                $content = $content.Substring(0, $sIdx) + $managedBlock + $content.Substring($eEnd)
-                Write-Utf8NoBom -Path $setupPath -Content $content
-                Write-Info "Refreshed managed Unity block (-Force)."
-            }
-        } else {
-            Write-Info "Managed Unity block already present - nothing to do (use -Force to refresh)."
-            # Detect old blocks that pre-date named-variant start steps (name: default / name: gui).
-            $blockStart = $content.IndexOf($startMarker)
-            $blockEnd   = $content.IndexOf($endMarker, $blockStart)
-            if ($blockStart -ge 0 -and $blockEnd -ge 0) {
-                $existingBlock = $content.Substring($blockStart, ($blockEnd + $endMarker.Length) - $blockStart)
-                if ($existingBlock -match 'UNITY_WORKTREE_GUI' -or
-                    $existingBlock -notmatch 'name: gui' -or
-                    $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER' -or
-                    $existingBlock -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' -or
-                    $existingBlock -notmatch 'UNITY_MCP_ALLOW_BATCH=1 does not suppress' -or
-                    $existingBlock -notmatch 'COLD START') {
-                    Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support or GUI-mode dialog caveat or cold-start hint). Re-run with -Force to refresh the block and enable named-variant steps (default/gui) and cache server support and Library mirror support and the GUI-mode dialog caveat and cold-start acceleration hints."
-                }
+        Write-Info "Managed Unity block already present - leaving it untouched (this script never rewrites an existing block)."
+        # Detect old blocks that pre-date named-variant start steps (name: default / name: gui).
+        $blockStart = $content.IndexOf($startMarker)
+        $blockEnd   = $content.IndexOf($endMarker, $blockStart)
+        if ($blockStart -ge 0 -and $blockEnd -ge 0) {
+            $existingBlock = $content.Substring($blockStart, ($blockEnd + $endMarker.Length) - $blockStart)
+            if ($existingBlock -match 'UNITY_WORKTREE_GUI' -or
+                $existingBlock -notmatch 'name: gui' -or
+                $existingBlock -notmatch 'UNITY_WORKTREE_CACHE_SERVER' -or
+                $existingBlock -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' -or
+                $existingBlock -notmatch 'UNITY_MCP_ALLOW_BATCH=1 does not suppress' -or
+                $existingBlock -notmatch 'COLD START') {
+                Write-Warn2 "The existing managed block is outdated (predates named-variant start steps or cache server support or Library mirror support or GUI-mode dialog caveat or cold-start hint). This script never rewrites an existing managed block - merge the current template below into .seretos/worktree-setup.yml by hand, between the markers, then commit."
+                Write-Warn2 "Merge the following managed block by hand (replace the block between the markers):"
+                Write-Host ""
+                Write-Host $managedBlock
+                Write-Host ""
             }
         }
     }

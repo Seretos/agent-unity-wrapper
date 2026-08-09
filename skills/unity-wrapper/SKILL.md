@@ -237,18 +237,22 @@ pwsh -File ${CLAUDE_PLUGIN_ROOT}/scripts/prepare-unity-worktree.ps1
 ```
 
 It detects existing config and only fills gaps (never clobbers a foreign `start:`/`stop:`
-block; pass `-Force` to refresh the managed block or flip `isolation` to `full`). Because a
-worktree is a checkout of the same repo, the tracked files it writes inherit to every future
-worktree — so you prepare once, not per worktree. Requires PowerShell 7+ for the launched
-start/stop steps.
+block). `-Force` only flips `isolation` to `full` when appending to a contract with no
+`start:`/`stop:` yet, and reconciles a mismatched `com.coplaydev.unity-mcp` pin in
+`Packages/manifest.json` — an existing managed block is **never** rewritten, by any flag.
+Because a worktree is a checkout of the same repo, the tracked files it writes inherit to
+every future worktree — so you prepare once, not per worktree. Requires PowerShell 7+ for
+the launched start/stop steps.
 
 > **Stale managed block.** If the managed block exists but was written by an older version
 > of the prepare-script, it may be missing the `UNITY_WORKTREE_CACHE_SERVER` conditional,
 > the `UNITY_WORKTREE_MIRROR_LIBRARY` conditional, or the `COLD START:` hint. In that
 > state, setting those env vars is **silently inert** — the block ignores them. The
-> prepare-script warns when it detects this. Re-run with `-Force` to refresh the managed
-> block, then commit the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo
-> already has all conditionals and needs no special action.
+> prepare-script warns and prints the current managed block; copy it into
+> `.seretos/worktree-setup.yml` by hand, replacing the region between the
+> `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers, then
+> commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
+> has all conditionals and needs no special action.
 
 ### Launch flow
 
@@ -340,9 +344,11 @@ full editor UI loads, which costs more memory and startup time than headless mod
 > **Repos prepared before named-variant steps were introduced:** the managed block must
 > contain both `name: default` and `name: gui` start steps. If your repo was prepared by
 > an older version of the prepare-script (the block has only a single unnamed start step or
-> still contains `UNITY_WORKTREE_GUI`), re-run the prepare-script **with `-Force`** to
-> refresh the managed block, then commit the updated `.seretos/worktree-setup.yml`. A
-> freshly-prepared repo already has both steps and needs no special action.
+> still contains `UNITY_WORKTREE_GUI`), the prepare-script warns and prints the current
+> managed block; copy it into `.seretos/worktree-setup.yml` by hand, replacing the region
+> between the `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed`
+> markers, then commit. Re-running with `-Force` will not do it for you. A freshly-prepared
+> repo already has both steps and needs no special action.
 
 ### Headless vs. GUI — automation workflow
 
@@ -441,9 +447,11 @@ CI host is a separate step — see
 > conditional lives inside the managed block written by the prepare-script. If your repo
 > was prepared by an older version of the script, the existing managed block does not
 > contain the conditional, so setting `UNITY_WORKTREE_CACHE_SERVER` is silently inert.
-> Re-run the prepare-script **with `-Force`** to refresh the managed block, then commit
-> the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo already has the
-> conditional and needs no special action.
+> The prepare-script warns and prints the current managed block; copy it into
+> `.seretos/worktree-setup.yml` by hand, replacing the region between the
+> `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers, then
+> commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
+> has the conditional and needs no special action.
 
 ### Warm-start: Mirror Main Library
 
@@ -529,9 +537,11 @@ flow.
 > conditional lives inside the managed block written by the prepare-script. If your repo
 > was prepared by an older version of the script, the existing managed block does not
 > contain the conditional, so setting `UNITY_WORKTREE_MIRROR_LIBRARY=1` is silently
-> inert. Re-run the prepare-script **with `-Force`** to refresh the managed block, then
-> commit the updated `.seretos/worktree-setup.yml`. A freshly-prepared repo already has
-> the conditional and needs no special action.
+> inert. The prepare-script warns and prints the current managed block; copy it into
+> `.seretos/worktree-setup.yml` by hand, replacing the region between the
+> `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers, then
+> commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
+> has the conditional and needs no special action.
 
 For a durable, infrastructure-backed alternative that survives project-path changes and
 branch switches, see the Cache Server section above.

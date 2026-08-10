@@ -131,3 +131,174 @@ Describe 'SKILL.md -- structural guards (ticket #31)' {
         ($bytes -contains 13) | Should Be $false
     }
 }
+
+# --- ticket #33: description discoverability + tool-inventory accuracy ------
+
+# Returns the single "description:" line's value from the leading frontmatter
+# block (text between the opening --- and the next \n---), with the key
+# stripped. Returns '' if no such block/line is found.
+function Get-FrontmatterDescription {
+    param([string]$Text)
+    $start = $Text.IndexOf('---')
+    if ($start -eq -1) { return '' }
+    $end = $Text.IndexOf("`n---", $start + 3)
+    if ($end -eq -1) { return '' }
+    $frontmatter = $Text.Substring($start, $end - $start)
+    foreach ($line in ($frontmatter -split "`n")) {
+        if ($line -match '^description:\s*(.*)$') {
+            return $Matches[1]
+        }
+    }
+    return ''
+}
+
+# Returns the substring from a given "## Heading" (inclusive) up to (not
+# including) the next top-level "## " heading. Returns '' if the heading is
+# absent; returns the rest of the file if there is no following "## ".
+function Get-Section {
+    param([string]$Text, [string]$Heading)
+    $sIdx = $Text.IndexOf($Heading)
+    if ($sIdx -eq -1) { return '' }
+    $eIdx = $Text.IndexOf("`n## ", $sIdx + $Heading.Length)
+    if ($eIdx -eq -1) { return $Text.Substring($sIdx) }
+    return $Text.Substring($sIdx, $eIdx - $sIdx)
+}
+
+Describe 'SKILL.md -- frontmatter description covers the whole skill (ticket #33)' {
+    $description = Get-FrontmatterDescription -Text $global:skillmd_text
+
+    It 'the description mentions Play mode' {
+        $description | Should Match '(?i)play mode'
+    }
+
+    It 'the description mentions run_tests and Test Runner' {
+        $description | Should Match 'run_tests'
+        $description | Should Match 'Test Runner'
+    }
+
+    It 'the description mentions the console and compilation errors' {
+        $description | Should Match 'console'
+        $description | Should Match 'compil'
+    }
+
+    It 'the description mentions screenshots' {
+        $description | Should Match 'screenshot'
+    }
+
+    It 'the description mentions worktree_start' {
+        $description | Should Match 'worktree_start'
+    }
+
+    It 'the description mentions headless and GUI variants' {
+        $description | Should Match 'headless'
+        $description | Should Match '(?i)gui'
+    }
+
+    It 'the description mentions cold-start expectations' {
+        $description | Should Match 'cold-start'
+    }
+
+    It 'the description mentions the stale UnityLockfile recovery case' {
+        $description | Should Match 'UnityLockfile'
+    }
+
+    It 'retains the original scene/GameObject/component/asset coverage' {
+        $description | Should Match 'scene'
+        $description | Should Match 'GameObject'
+        $description | Should Match 'component'
+        $description | Should Match 'asset'
+    }
+
+    It 'the description stays one physical line' {
+        $description.Contains("`n") | Should Be $false
+    }
+
+    It 'the description is at most 1024 characters' {
+        $description.Length | Should BeLessThan 1025
+    }
+
+    It 'the description contains no ": " sequence (YAML plain-scalar guard)' {
+        $description | Should Not Match ':\s'
+    }
+}
+
+Describe 'SKILL.md -- Tool inventory names real MCP tools (ticket #33)' {
+    $toolSection = Get-Section -Text $global:skillmd_text -Heading '## Tool inventory'
+    $realTools = @('manage_scene', 'find_gameobjects', 'manage_gameobject', 'manage_components',
+        'manage_asset', 'manage_editor', 'manage_camera', 'read_console', 'execute_code',
+        'run_tests', 'get_test_job', 'manage_build', 'refresh_unity', 'manage_tools',
+        'batch_execute', 'manage_script')
+
+    It 'the Tool inventory section names every real MCP tool identifier' {
+        foreach ($tool in $realTools) {
+            $toolSection.Contains($tool) | Should Be $true
+        }
+    }
+
+    It 'no longer disclaims that method identifiers are defined upstream' {
+        $global:skillmd_text.Contains('the exact MCP method identifiers are defined by') | Should Be $false
+    }
+
+    It 'none of the invented capability-area labels survive anywhere in the file' {
+        $inventedLabels = @('Scene inspection', 'GameObject queries', 'Component read', 'Component write',
+            'Asset listing', 'Asset inspection', 'Play-mode control', 'Script / console access')
+        foreach ($label in $inventedLabels) {
+            $global:skillmd_text.Contains($label) | Should Be $false
+        }
+    }
+
+    It 'documents the component-read resource path' {
+        $toolSection | Should Match 'mcpforunity://scene/gameobject'
+    }
+
+    It 'states the tool-name provenance' {
+        $toolSection | Should Match 'mcpforunityserver'
+    }
+
+    It 'names the gated tool groups' {
+        $toolSection | Should Match 'scripting_ext'
+        $toolSection | Should Match 'testing'
+    }
+
+    It 'closes with a pointer to manage_tools for the omitted domain tools' {
+        $toolSection | Should Match 'manage_tools'
+    }
+}
+
+Describe 'SKILL.md -- recipes call tools by name (ticket #33)' {
+    $recipesSection = Get-Section -Text $global:skillmd_text -Heading '## Patterns and recipes'
+
+    It 'the Play-mode recipe names manage_editor' {
+        $recipesSection | Should Match 'manage_editor'
+    }
+
+    It 'recipes name manage_components' {
+        $recipesSection | Should Match 'manage_components'
+    }
+
+    It 'recipes name manage_asset' {
+        $recipesSection | Should Match 'manage_asset'
+    }
+
+    It 'recipes name manage_scene' {
+        $recipesSection | Should Match 'manage_scene'
+    }
+
+    It 'recipes name find_gameobjects' {
+        $recipesSection | Should Match 'find_gameobjects'
+    }
+
+    It 'recipes name manage_camera' {
+        $recipesSection | Should Match 'manage_camera'
+    }
+
+    It 'the screenshot recipe still names execute_code (Q2 preservation guard)' {
+        $recipesSection | Should Match 'execute_code'
+    }
+
+    It 'the screenshot recipe C# fallback markers are intact (Q2 preservation guard)' {
+        $recipesSection | Should Match 'ScreenCapture'
+        $recipesSection | Should Match 'EncodeToPNG'
+        $recipesSection | Should Match '\[VisualVerify\] Screenshot saved'
+    }
+}

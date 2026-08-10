@@ -1,6 +1,6 @@
 ---
 name: unity-wrapper
-description: Drive the Unity editor through the external Unity MCP server — inspect and modify scenes, GameObjects, components, and assets via structured operations instead of guessing project state. Use when working inside a Unity project, exploring its scene graph, or making editor changes.
+description: Drive the Unity editor through the external Unity MCP server (server key unityMCP) — inspect and edit scenes, GameObjects, components and assets, enter and exit Play mode, capture screenshots, run Unity Test Runner tests (run_tests, EditMode and PlayMode), and read the Unity console for compilation errors after a script write, instead of guessing project state. Also covers booting a per-worktree Unity editor with worktree_start (headless vs GUI variants, UNITY_MCP_STATUS_DIR isolation), cold-start Library re-import expectations and acceleration, standalone builds, and recovering when a tool call reports no Unity Editor instances or Unity refuses to open a project because of a stale Temp/UnityLockfile. Use when working inside a Unity project, starting or connecting to a Unity editor, or when a Unity MCP tool call fails.
 ---
 
 # unity-wrapper
@@ -44,19 +44,48 @@ Key entities the MCP exposes:
 ## Tool inventory
 
 The tools below are exposed by the Unity MCP server (MCP server key: `unityMCP`).
-Tool names are the capability areas; the exact MCP method identifiers are defined by
-the upstream `CoplayDev/unity-mcp` server.
+These are the **real MCP tool identifiers** — call them by these names. They were read
+from the `mcpforunityserver` package source (9.7.3); the manifests currently pin
+`mcpforunityserver==9.7.1`, so if a name is rejected, list the live surface with
+`manage_tools` or read the `mcpforunity://tool-groups` resource rather than guessing.
 
-| Tool / Area | What it is best for |
+**Reads are resources, writes are tools.** Several read paths are MCP *resources*
+(`mcpforunity://…`), not tools — most importantly component reads, which have no tool.
+
+**Tools are grouped, and groups can be off.** Group `core` is always on. `execute_code`
+is in `scripting_ext`; `run_tests` and `get_test_job` are in `testing`; `manage_tools`
+and `set_active_instance` are always visible. Over stdio all groups start enabled and
+then sync with Unity's own tool states — so a tool that is *missing from the list* is a
+disabled group (fix with `manage_tools`), which is a different failure from a tool that
+is listed but *fails to call* (bridge unreachable — see Pitfall 1).
+
+| Tool | What it is best for |
 |---|---|
-| **Scene inspection** | List open scenes, get the full GameObject hierarchy, query scene metadata (name, path, dirty state) |
-| **GameObject queries** | Find GameObjects by name, tag, or path; get a GameObject's children, active state, transform, and component list |
-| **Component read** | Read all field values on a named component attached to a specific GameObject |
-| **Component write** | Set one or more fields on a named component (e.g. change a `Transform.position`, toggle a flag) |
-| **Asset listing** | List files under `Assets/` filtered by folder or type; useful for locating scripts, prefabs, and materials |
-| **Asset inspection** | Read metadata and serialized content of a specific asset by its project-relative path |
-| **Play-mode control** | Enter Play mode, exit Play mode, query the current editor mode |
-| **Script / console access** | Execute editor scripts or retrieve Unity console log output (errors, warnings, info) |
+| `manage_scene` | Scene CRUD and inspection — `get_hierarchy` (paged: `page_size`, `cursor`, `max_depth`), `get_active`, `get_loaded_scenes`, `create`, `load`, `save`, `close_scene`, `set_active_scene` |
+| `find_gameobjects` | Searching the scene by name, tag, layer, component type, or path; returns paged **instance IDs** only |
+| `manage_gameobject` | GameObject CRUD — `create`, `modify`, `delete`, `duplicate`, `move_relative`, `look_at`. Not for searching, not for components |
+| `manage_components` | Component **writes** — `add`, `remove`, `set_property` on a target GameObject. It has no read action |
+| `mcpforunity://scene/gameobject/{id}` · `.../components` · `.../component/{name}` | Component and GameObject **reads** (resources, not tools). Get `{id}` from `find_gameobjects` |
+| `manage_asset` | Assets under `Assets/` — `search` (page it and keep `generate_preview=false`), import, create, modify, delete |
+| `manage_editor` | Entering/exiting Play mode (`play`, `pause`, `stop`) plus tags, layers, active tool, `undo`/`redo` |
+| `mcpforunity://editor/state` | Current editor state — read this to know whether you are in Edit or Play mode before editing |
+| `manage_camera` | Screenshots — `screenshot`, `screenshot_multiview` (optionally `include_image` for an inline PNG). The first-class capture path |
+| `read_console` | Unity console — `get` (paged; errors/warnings/info) or `clear`. This is how you see **compilation errors** after writing a script |
+| `execute_code` | Arbitrary C# inside the editor — `execute`, `get_history`, `replay`, `clear_history`. Group `scripting_ext` |
+| `manage_script`, `apply_text_edits`, `script_apply_edits`, `create_script`, `delete_script`, `validate_script`, `get_sha`, `find_in_file` | C# script files in the project — create, read, edit, validate, hash-verify |
+| `run_tests` + `get_test_job` | Unity Test Runner. `run_tests` starts an `EditMode`/`PlayMode` run **asynchronously** and returns a `job_id`; poll `get_test_job`. PlayMode needs a longer `init_timeout` (~120000 ms). Group `testing` — see Pitfall 6 before using it |
+| `manage_build` | Standalone player builds and the build-settings scene list (`action='scenes'`) |
+| `manage_prefabs` | Prefab CRUD and the prefab stage (open/save/close) |
+| `execute_menu_item` | Invoking a Unity editor menu item by path |
+| `refresh_unity` | Asset-database refresh / recompile; reports `recovered_from_disconnect: true` after a bridge drop (Pitfall 1) |
+| `batch_execute` | Bundling several MCP commands into one round-trip — strongly preferred for repetitive edits |
+| `manage_tools` | Listing tool groups and enabling/disabling them. Always visible; reach for it when an expected tool is absent |
+| `set_active_instance` | Selecting among multiple discovered Unity instances — normally unnecessary here (status-dir isolation guarantees exactly one) |
+
+Further groups exist for domain work — `vfx` (`manage_vfx`, `manage_shader`, `manage_texture`),
+`ui` (`manage_ui`), `animation` (`manage_animation`), `docs` (`unity_docs`, `unity_reflect`),
+`probuilder`, `profiling` — plus `manage_material`, `manage_graphics`, `manage_physics`,
+`manage_packages`, `manage_scriptable_object`. Enumerate the live set with `manage_tools`.
 
 ## Patterns and recipes
 
@@ -67,52 +96,57 @@ result. See "Capture a screenshot from Play mode" below.
 
 ### Inspect the scene hierarchy
 
-1. Use the **scene inspection** tool to list open scenes and confirm which scene is active.
-2. Use the **scene inspection** / **GameObject queries** tool to retrieve the root
-   GameObjects and recursively expand the hierarchy to the depth you need.
-3. Use **GameObject queries** (find by name/tag) when you know what you are looking for
+1. Use `manage_scene action=get_loaded_scenes` (or `action=get_active`) to confirm which
+   scene is active.
+2. Use `manage_scene action=get_hierarchy` to retrieve the root GameObjects and
+   recursively expand the hierarchy to the depth you need (page it with `page_size`,
+   `cursor`, `max_depth`).
+3. Use `find_gameobjects` (find by name/tag) when you know what you are looking for
    rather than walking the whole tree.
 
 ### Read a component value on a specific GameObject
 
-1. Use **GameObject queries** (find by name or path) to confirm the target GameObject
-   exists and to get its component list.
-2. Use **component read** with the GameObject path and component type name to retrieve
-   all field values.
-3. Inspect the returned fields — field names match Unity's serialized property names
-   (e.g. `m_LocalPosition` for a Transform).
+1. Use `find_gameobjects` (find by name or path) to confirm the target GameObject exists
+   and to get its **instance ID**.
+2. Read `mcpforunity://scene/gameobject/{id}/components` (or `.../component/{name}` for a
+   single component) with that ID to retrieve all field values.
+3. Inspect the returned fields — field names follow Unity's serialized property naming.
 
 ### Modify a component field
 
-1. Confirm the target with **component read** first (see above) so you know current
+1. Confirm the target via the components resource first (see above) so you know current
    values and correct field names.
-2. Use **component write** supplying the GameObject path, component type, and a dict of
-   `{fieldName: newValue}`.
-3. Re-read with **component read** to verify the change took effect.
-4. Save the scene explicitly (via the editor or a save-scene tool call) if the change
-   must survive a crash or reload.
+2. Use `manage_components action=set_property` supplying the GameObject, component type,
+   and a dict of `{fieldName: newValue}`.
+3. Re-read the components resource to verify the change took effect.
+4. Save the scene explicitly (`manage_scene action=save`) if the change must survive a
+   crash or reload.
 
 ### List and inspect project assets
 
-1. Use **asset listing** to enumerate files under a specific folder (e.g. `Assets/Scripts`)
-   or filtered by extension/type.
-2. Use **asset inspection** with the returned project-relative path to read a specific
-   asset's content or metadata.
+1. Use `manage_asset action=search` to enumerate files under a specific folder (e.g.
+   `Assets/Scripts`) or filtered by extension/type — page it and keep
+   `generate_preview=false`.
+2. Use `manage_asset` with the returned project-relative path to read a specific asset's
+   content or metadata.
 
 ### Enter and exit Play mode
 
-1. Use **play-mode control** to query the current editor mode — confirm you are in Edit
-   mode before entering.
-2. Use **play-mode control** to enter Play mode and wait for confirmation that the
+1. Read `mcpforunity://editor/state` to confirm you are in Edit mode before entering.
+2. Use `manage_editor action=play` to enter Play mode and wait for confirmation that the
    editor has transitioned.
 3. Perform any play-mode-specific queries (e.g. reading runtime component values).
-4. Use **play-mode control** to exit Play mode before making any scene edits.
+4. Use `manage_editor action=stop` to exit Play mode before making any scene edits.
 
 ### Capture a screenshot from Play mode
 
 The Unity MCP can capture a screenshot of the running scene from Play mode. Capture one
 when a human will want to see the result — for example, when the runtime appearance of a
 UI or scene change is worth showing.
+
+`manage_camera action=screenshot` is the first-class capture path. The `execute_code`
+recipe below is the fallback for when `scripting_ext` is unavailable or you need custom
+framing/output paths.
 
 **Prerequisites:** Unity must be running under `variant=gui` (not headless). In headless
 mode (`-batchmode -nographics`), `ScreenCapture.CaptureScreenshot` produces no output and
@@ -167,11 +201,12 @@ UnityEngine.Debug.Log($"[VisualVerify] Screenshot saved: {outputPath}");
 
 1. Boot with `worktree_start variant=gui` (GUI mode is required — see prerequisite above).
 2. Wait for `unity-mcp-status-*.json` to appear in `.unity-mcp/` (bridge ready signal).
-3. Enter Play mode via play-mode control and wait for the transition to complete.
+3. Enter Play mode via `manage_editor action=play` and wait for the transition to complete.
 4. Allow the scene one or two frames to finish its startup sequence (if the project has a
    loading screen, wait for it to resolve — inspect a known UI element's active state via
-   component read if you need to gate on scene readiness).
-5. Execute the code block above via script / console access (`execute_code`).
+   the components resource if you need to gate on scene readiness).
+5. Execute the code block above via `execute_code action=execute` (note its `scripting_ext`
+   group).
 6. Read the path from the Debug.Log console output (`[VisualVerify] Screenshot saved: ...`) and inspect the image at `<worktree>/.unity-mcp/screenshot.png`.
 7. Exit Play mode before making any structural edits.
 
@@ -575,7 +610,7 @@ branch switches, see the Cache Server section above.
    if needed.
 
 3. **Unsaved scene state.** The MCP reads and writes the live editor state. Changes made
-   via component write or other mutation tools are visible immediately in the editor but
+   via `manage_components` or other mutation tools are visible immediately in the editor but
    are NOT saved to disk until an explicit save. If the editor crashes or the scene is
    reloaded without saving, those changes are lost. Always save explicitly after a
    meaningful batch of edits.

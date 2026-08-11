@@ -274,10 +274,11 @@ pwsh -File ${CLAUDE_PLUGIN_ROOT}/scripts/prepare-unity-worktree.ps1
 Existence, not content, decides whether it may touch `.seretos/worktree-setup.yml`: if
 the file is absent, it creates it with the full managed block; if the file already
 exists — with a managed block, a foreign contract, or no `start:`/`stop:` at all — the
-script **never writes to it again**, under any flag or condition. `-Force` only
-reconciles a mismatched `com.coplaydev.unity-mcp` pin in `Packages/manifest.json`; it has
-no effect on `.seretos/worktree-setup.yml`. When the file exists and looks missing or
-outdated, the script prints the current template for a human to paste in by hand.
+script **never writes to it again**, under any flag or condition. It also never reads
+the file's contents (ticket #39) — the only check made is whether the file exists, so
+it gives no signal at all about what an existing file contains: no staleness warning, no
+`isolation` check, nothing. `-Force` only reconciles a mismatched `com.coplaydev.unity-mcp`
+pin in `Packages/manifest.json`; it has no effect on `.seretos/worktree-setup.yml`.
 Because a worktree is a checkout of the same repo, the tracked files it writes inherit to
 every future worktree — so you prepare once, not per worktree. Requires PowerShell 7+ for
 the launched start/stop steps.
@@ -285,14 +286,15 @@ the launched start/stop steps.
 > **Stale or missing managed block.** If `.seretos/worktree-setup.yml` already exists but
 > has no current managed block — it may predate the `UNITY_WORKTREE_CACHE_SERVER`
 > conditional, the `UNITY_WORKTREE_MIRROR_LIBRARY` conditional, or the `COLD START:` hint,
-> or it may never have had a managed block at all — the prepare-script does **not** write
-> to it. It warns and prints the current managed block; copy it into
-> `.seretos/worktree-setup.yml` by hand, between the
-> `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers (or
-> paste the whole template if there is no `start:`/`stop:` yet), then commit. Re-running
-> with `-Force` will not do it for you — the file already exists, so the script leaves it
-> alone. A freshly-prepared repo already has all conditionals and needs no special
-> action.
+> or it may never have had a managed block at all — the prepare-script gives **no signal**
+> about it: it does not read the file, so it cannot tell you it's stale. To adopt a newer
+> template, copy the `$managedBlock` here-string out of
+> `scripts/prepare-unity-worktree.ps1` by hand and merge it into
+> `.seretos/worktree-setup.yml` between the `# >>> agent-unity-wrapper managed` /
+> `# <<< agent-unity-wrapper managed` markers (or paste the whole template if there is no
+> `start:`/`stop:` yet), then commit. Re-running with `-Force` will not do it for you — the
+> file already exists, so the script leaves it alone. A freshly-prepared repo already has
+> all conditionals and needs no special action.
 
 ### Launch flow
 
@@ -384,11 +386,13 @@ full editor UI loads, which costs more memory and startup time than headless mod
 > **Repos prepared before named-variant steps were introduced:** the managed block must
 > contain both `name: default` and `name: gui` start steps. If your repo was prepared by
 > an older version of the prepare-script (the block has only a single unnamed start step or
-> still contains `UNITY_WORKTREE_GUI`), the prepare-script warns and prints the current
-> managed block; copy it into `.seretos/worktree-setup.yml` by hand, replacing the region
-> between the `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed`
-> markers, then commit. Re-running with `-Force` will not do it for you. A freshly-prepared
-> repo already has both steps and needs no special action.
+> still contains `UNITY_WORKTREE_GUI`), the prepare-script gives no signal about it — it
+> never reads an existing file's contents. To adopt the current block, copy the
+> `$managedBlock` here-string out of `scripts/prepare-unity-worktree.ps1` by hand and
+> merge it into `.seretos/worktree-setup.yml`, replacing the region between the
+> `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers, then
+> commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
+> has both steps and needs no special action.
 
 ### Headless vs. GUI — automation workflow
 
@@ -486,9 +490,11 @@ CI host is a separate step — see
 > **Repos prepared before this feature was added:** the `UNITY_WORKTREE_CACHE_SERVER`
 > conditional lives inside the managed block written by the prepare-script. If your repo
 > was prepared by an older version of the script, the existing managed block does not
-> contain the conditional, so setting `UNITY_WORKTREE_CACHE_SERVER` is silently inert.
-> The prepare-script warns and prints the current managed block; copy it into
-> `.seretos/worktree-setup.yml` by hand, replacing the region between the
+> contain the conditional, so setting `UNITY_WORKTREE_CACHE_SERVER` is silently inert —
+> and the prepare-script gives no signal about it, since it never reads an existing
+> file's contents. To adopt the current block, copy the `$managedBlock` here-string out
+> of `scripts/prepare-unity-worktree.ps1` by hand and merge it into
+> `.seretos/worktree-setup.yml`, replacing the region between the
 > `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers, then
 > commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
 > has the conditional and needs no special action.
@@ -577,8 +583,10 @@ flow.
 > conditional lives inside the managed block written by the prepare-script. If your repo
 > was prepared by an older version of the script, the existing managed block does not
 > contain the conditional, so setting `UNITY_WORKTREE_MIRROR_LIBRARY=1` is silently
-> inert. The prepare-script warns and prints the current managed block; copy it into
-> `.seretos/worktree-setup.yml` by hand, replacing the region between the
+> inert — and the prepare-script gives no signal about it, since it never reads an
+> existing file's contents. To adopt the current block, copy the `$managedBlock`
+> here-string out of `scripts/prepare-unity-worktree.ps1` by hand and merge it into
+> `.seretos/worktree-setup.yml`, replacing the region between the
 > `# >>> agent-unity-wrapper managed` / `# <<< agent-unity-wrapper managed` markers, then
 > commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
 > has the conditional and needs no special action.

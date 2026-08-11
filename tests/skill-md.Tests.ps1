@@ -323,3 +323,28 @@ Describe 'SKILL.md -- existence-based ownership of worktree-setup.yml (ticket #3
         $global:skillmd_text | Should Match 'under any flag'
     }
 }
+
+Describe 'SKILL.md -- no content inspection of an existing worktree-setup.yml (ticket #39)' {
+
+    It 'does not claim the prepare-script warns and prints an advisory' {
+        $global:skillmd_text | Should Not Match 'warns and prints'
+    }
+
+    It 'does not claim the prepare-script prints the current template' {
+        $global:skillmd_text | Should Not Match 'prints the current template'
+    }
+
+    It 'still documents the manual-merge-by-hand workaround' {
+        $global:skillmd_text | Should Match 'by hand'
+    }
+
+    # #37 phrase guards must still hold after the #39 rewrite.
+    It 'still does not claim that -Force flips isolation' {
+        $global:skillmd_text | Should Not Match 'Force.{0,40}flip'
+        $global:skillmd_text | Should Not Match 'flip.{0,40}isolation'
+    }
+
+    It 'still does not claim -Force appends the managed block to a contract with no start/stop' {
+        $global:skillmd_text | Should Not Match 'appending to a contract'
+    }
+}

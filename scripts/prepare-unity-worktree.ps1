@@ -14,10 +14,10 @@
 
   `.seretos/worktree-setup.yml` is created only when absent. Once the file exists -
   whether it carries the managed block, a foreign contract, or no start:/stop: at all -
-  the script never writes to it again, under any flag or condition: no append, no
-  isolation flip, no reconcile. It only reads the file and, when the block looks
-  missing or outdated, prints the current template for manual paste. Re-running is a
-  no-op once the repo is fully prepared.
+  the script never touches it again, under any flag or condition: no read, no append,
+  no isolation flip, no reconcile, no advisory. Existence (`Test-Path`) is the only
+  check ever made; the script does not open the file, so it cannot and does not
+  comment on its contents. Re-running is a no-op once the repo is fully prepared.
 
   What it ensures:
     1. `.seretos/worktree-setup.yml` carries a managed `start:`/`stop:` block with two
@@ -27,7 +27,7 @@
        `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi` so the in-editor
        bridge boots and writes its status file into the worktree-local status dir.
        `isolation` is set to `full` in a freshly-created contract (the contract forbids
-       start/stop under `none`); an existing file's `isolation` is never edited.
+       start/stop under `none`); an existing file's `isolation` is never read or edited.
     2. The Unity MCP bridge package (`com.coplaydev.unity-mcp`) is referenced in
        `Packages/manifest.json`.
     3. `.gitignore` ignores the runtime `.unity-mcp/` status dir.
@@ -46,8 +46,8 @@
   Without it, a version mismatch is reported and left untouched. -Force has no effect on
   `.seretos/worktree-setup.yml`: that file is created only when absent, and once it
   exists - with a managed block, a foreign contract, or no `start:`/`stop:` at all - it
-  is never written to, by any flag. A missing or outdated managed block is reported with
-  the current template printed for manual paste instead.
+  is never read or written to, by any flag. Existence, not content, is the only thing
+  that is ever checked.
 
 .NOTES
   Requires PowerShell 7+ for the launched start/stop steps (they run via `shell: pwsh`).
@@ -289,43 +289,12 @@ if (-not (Test-Path $setupPath)) {
     Write-Info "Created .seretos/worktree-setup.yml with managed Unity start/stop block."
 }
 else {
-    # The file already exists - read-only from here. No append, no isolation flip, no
-    # reconcile, under any flag or content shape (ticket #37: existence, not marker
-    # recognition, is the sole ownership rule).
-    $content = Get-Content -LiteralPath $setupPath -Raw
-    if ($null -eq $content) { $content = '' }
-
-    # Structural check: does the file actually define start:/stop: steps at all? This is
-    # a property of the contract's shape, not recognition of the plugin's own markers -
-    # it catches a foreign/partially-adapted file that happens to contain every token
-    # below without ever defining a usable start:/stop: block.
-    $hasStartStop = ($content -match '(?m)^\s*start\s*:') -and ($content -match '(?m)^\s*stop\s*:')
-
-    # Advisory heuristic over the WHOLE file text - a file with a foreign contract or
-    # no start:/stop: at all necessarily fails these same checks, so this one predicate
-    # covers "missing", "foreign" and "outdated" alike; it never gates a write.
-    $looksOutdatedOrMissing = (
-        -not $hasStartStop -or
-        $content -match 'UNITY_WORKTREE_GUI' -or
-        $content -notmatch 'name: gui' -or
-        $content -notmatch 'UNITY_WORKTREE_CACHE_SERVER' -or
-        $content -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' -or
-        $content -notmatch 'UNITY_MCP_ALLOW_BATCH=1 does not suppress' -or
-        $content -notmatch 'COLD START'
-    )
-    if ($looksOutdatedOrMissing) {
-        Write-Warn2 "The existing .seretos/worktree-setup.yml does not contain a current managed Unity start/stop block (missing, foreign, or outdated). This script never writes to an existing file - merge the current template below into .seretos/worktree-setup.yml by hand, then commit."
-        Write-Warn2 "Merge the following managed block by hand (and ensure 'isolation: full'):"
-        Write-Host ""
-        Write-Host $managedBlock
-        Write-Host ""
-    } else {
-        Write-Info "Managed Unity block already present - leaving it untouched (this script never rewrites an existing block)."
-    }
-
-    if ($content -notmatch '(?m)^\s*isolation\s*:\s*full\s*$') {
-        Write-Warn2 "'.seretos/worktree-setup.yml' does not have 'isolation: full' - start/stop steps do not run under 'none'/'partial'. This script never edits the file; set it by hand."
-    }
+    # The file already exists. Existence, not content, is the sole ownership rule
+    # (ticket #37): no append, no isolation flip, no reconcile, under any flag. Ticket
+    # #39 carries this the rest of the way - the script does not read the file at all,
+    # so it cannot classify it as missing/foreign/outdated, and it never comments on
+    # `isolation` or any other field. Test-Path above is the only permitted check.
+    Write-Info ".seretos/worktree-setup.yml exists - leaving it untouched."
 }
 
 # --- 2. Packages/manifest.json (bridge package) ------------------------------

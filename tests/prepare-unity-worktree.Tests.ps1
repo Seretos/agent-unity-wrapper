@@ -274,10 +274,6 @@ Describe 'prepare-unity-worktree.ps1 — existence-based ownership (ticket #37)'
             $after = Get-Content -LiteralPath $setupPath -Raw
             $after | Should Be $before
             $after | Should Not Match '>>> agent-unity-wrapper managed'
-
-            # Advisory: warns and prints the template for manual paste instead of writing.
-            $out | Should Match 'by hand'
-            $out | Should Match 'agent-unity-wrapper managed'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
@@ -375,48 +371,6 @@ Describe 'prepare-unity-worktree.ps1 — existence-based ownership (ticket #37)'
         $global:puw_managedBlock | Should Match 'edit it freely'
     }
 
-    # Codex correctness finding on the #37 fix cycle: the whole-file token scan can be
-    # fooled by a foreign/partially-adapted file that happens to contain all six current
-    # tokens without ever defining an actually-usable start:/stop: block. The advisory
-    # predicate must also fire on this structural gap (no start:/stop: keys at all) -
-    # not by recognising the plugin's own markers, just by checking the contract's shape.
-    It 'ticket-37: fix-gap: all six tokens present but no start/stop keys still triggers the advisory' {
-        $tmp = New-TempUnityRepo
-        try {
-            $setupDir = Join-Path $tmp '.seretos'
-            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
-            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
-            # Deliberately contains every token the whole-file heuristic checks for, but
-            # defines no start:/stop: steps at all - the "misclassified as current" gap.
-            $fixture = @'
-version: 1
-isolation: full
-
-# name: gui
-# UNITY_WORKTREE_CACHE_SERVER
-# UNITY_WORKTREE_MIRROR_LIBRARY
-# UNITY_MCP_ALLOW_BATCH=1 does not suppress
-# COLD START
-'@
-            Write-Utf8NoBom -Path $setupPath -Content $fixture
-            $before = Get-Content -LiteralPath $setupPath -Raw
-
-            $threw = $false
-            $out = $null
-            try {
-                $out = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
-            } catch {
-                $threw = $true
-            }
-            $threw | Should Be $false
-
-            $after = Get-Content -LiteralPath $setupPath -Raw
-            $after | Should Be $before
-
-            $out | Should Match 'by hand'
-            $out | Should Match 'agent-unity-wrapper managed'
-        } finally { Remove-TempUnityRepo $tmp }
-    }
 }
 
 # ---------------------------------------------------------------------------
@@ -483,10 +437,6 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
 
             $after = Get-Content -LiteralPath $setupPath -Raw
             $after | Should Be $before
-
-            # Stale block -> warn + print for manual merge, still no rewrite.
-            $out | Should Match 'by hand'
-            ($wv | Out-String) | Should Match 'outdated'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
@@ -502,53 +452,10 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    # Ticket #28 — a stale managed block prints the current template for manual merge instead of rewriting.
-    It 'stale block: prints the current managed block for manual merge instead of rewriting' {
-        $tmp = New-TempUnityRepo
-        try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
-            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_CACHE_SERVER' }) -join "`n"
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
-            $before = Get-Content -LiteralPath $setupPath -Raw
-
-            $out = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
-
-            $out | Should Match 'agent-unity-wrapper managed'
-            $out | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
-            $out | Should Match 'by hand'
-
-            $after = Get-Content -LiteralPath $setupPath -Raw
-            $after | Should Be $before
-        } finally { Remove-TempUnityRepo $tmp }
-    }
-
-    It 'stale block: -Force produces output and file identical to the no-Force run (Force is inert on stale blocks)' {
-        $tmp = New-TempUnityRepo
-        try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
-            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_CACHE_SERVER' }) -join "`n"
-
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
-            $outNoForce = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
-            $fileAfterNoForce = Get-Content -LiteralPath $setupPath -Raw
-
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
-            $outForce = & $global:puw_scriptPath -RepoRoot $tmp -Force *>&1 | Out-String
-            $fileAfterForce = Get-Content -LiteralPath $setupPath -Raw
-
-            $outForce | Should Be $outNoForce
-            $fileAfterForce | Should Be $fileAfterNoForce
-        } finally { Remove-TempUnityRepo $tmp }
-    }
-
-    # Ticket #37 — a foreign start:/stop: block is no longer a "manual merge
-    # required" error: the script reads the file, advises, prints the template
-    # for manual paste, and exits 0 like every other "file already exists" case.
-    It 'ticket-37: foreign start/stop block is printed for manual paste, never throws, exits 0' {
+    # Ticket #37/#39 — a foreign start:/stop: block is left untouched (no read, no
+    # write, no advisory) and the script still exits 0 like every other
+    # "file already exists" case.
+    It 'ticket-37: foreign start/stop block is left untouched, never throws, exits 0' {
         $tmp = New-TempUnityRepo
         try {
             New-Item -ItemType Directory -Path (Join-Path $tmp '.seretos') -Force | Out-Null
@@ -557,17 +464,13 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
             Write-Utf8NoBom -Path $setupPath -Content $foreign
             $before = Get-Content -LiteralPath $setupPath -Raw
 
-            # In-process: must not throw, and prints the template for manual paste.
             $threw = $false
-            $out = $null
             try {
-                $out = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
+                & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-Null
             } catch {
                 $threw = $true
             }
             $threw | Should Be $false
-            $out | Should Match 'agent-unity-wrapper managed'
-            $out | Should Match 'by hand'
 
             $after = Get-Content -LiteralPath $setupPath -Raw
             $after | Should Be $before
@@ -603,58 +506,166 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    # Fix 2b — warn when existing block predates named-variant start steps.
-    It 'Fix-2b: emits a Write-Warning hint when existing block lacks name: gui (pre-named-variant block)' {
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #39 — no content inspection. Ticket #37 established that an existing
+# .seretos/worktree-setup.yml is never written to; #39 carries the same
+# ownership rule to reads: once the file exists, the script must not open it
+# at all, must not classify it as missing/foreign/outdated, and must not warn
+# about its contents (isolation value included). Existence (Test-Path) is the
+# only permitted check.
+Describe 'prepare-unity-worktree.ps1 — no content inspection (ticket #39)' {
+
+    It 'foreign existing file produces no content-related warning' {
         $tmp = New-TempUnityRepo
         try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $tmp '.seretos') -Force | Out-Null
             $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-
-            # Strip every line containing 'name: gui' to simulate a pre-named-variant block.
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'name: gui' }) -join "`n"
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
+            $foreign = "version: 1`nisolation: full`n`nstart:`n  - name: custom`n    shell: pwsh`n    run: echo hi`nstop:`n  - name: custom-stop`n    shell: pwsh`n    run: echo bye`n"
+            Write-Utf8NoBom -Path $setupPath -Content $foreign
 
             $wv = $null
-            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
-            ($wv | Out-String) | Should Match 'by hand'
-            ($wv | Out-String) | Should Not Match '-Force'
+            $out = & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv *>&1 | Out-String
+
+            $out | Should Match 'leaving it untouched'
+            $out | Should Not Match 'by hand'
+            $out | Should Not Match 'outdated'
+            $out | Should Not Match '>>> agent-unity-wrapper managed'
+            ($wv | Out-String) | Should Not Match 'worktree-setup'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    # Fix 2b (variant) — warn when existing block still contains UNITY_WORKTREE_GUI (old env-var style).
-    It 'Fix-2b-gui-env: emits a Write-Warning hint when existing block contains UNITY_WORKTREE_GUI' {
+    It 'isolation: partial in an existing file draws no warning' {
         $tmp = New-TempUnityRepo
         try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $tmp '.seretos') -Force | Out-Null
             $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-
-            # Inject old UNITY_WORKTREE_GUI text into the block to simulate an old env-var-style block.
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $injected = $content -replace '# <<< agent-unity-wrapper managed', "      if (`$env:UNITY_WORKTREE_GUI -eq '1') { Write-Host gui }`n# <<< agent-unity-wrapper managed"
-            Write-Utf8NoBom -Path $setupPath -Content $injected
+            Write-Utf8NoBom -Path $setupPath -Content "version: 1`nisolation: partial`n"
 
             $wv = $null
             & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
-            ($wv | Out-String) | Should Match 'by hand'
+            ($wv | Out-String) | Should Not Match 'isolation'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    # Ticket #28 — the currently-uncovered COLD START heuristic.
-    It 'Fix-2b-coldstart: emits a Write-Warning hint when existing block lacks the COLD START hint' {
+    It 'an existing file with no isolation key at all draws no warning' {
+        $tmp = New-TempUnityRepo
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $tmp '.seretos') -Force | Out-Null
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+            Write-Utf8NoBom -Path $setupPath -Content "hello: world`n"
+
+            $wv = $null
+            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
+            ($wv | Out-String) | Should Not Match 'isolation'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'script never reads the existing setup file (static source check)' {
+        $src = [System.IO.File]::ReadAllText($global:puw_scriptPath)
+        $src | Should Not Match 'Get-Content[^\r\n]*\$setupPath'
+        $src | Should Not Match '\$looksOutdatedOrMissing'
+        $src | Should Not Match '\$hasStartStop'
+        $src | Should Not Match ([regex]::Escape('isolation\s*:\s*full'))
+        ([regex]::Matches($src, [regex]::Escape('Write-Utf8NoBom -Path $setupPath')).Count) | Should Be 1
+    }
+
+    # Re-authored from the deleted "stale block: -Force produces output and file
+    # identical to the no-Force run" test - a plain -Force parity guard, no
+    # "stale" framing (the script no longer classifies contents at all).
+    It '-Force output and file are identical to the no-Force run for an existing file' {
         $tmp = New-TempUnityRepo
         try {
             & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
             $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-
-            # Strip every line containing 'COLD START' to simulate an old block.
             $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'COLD START' }) -join "`n"
+            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_CACHE_SERVER' }) -join "`n"
+
             Write-Utf8NoBom -Path $setupPath -Content $stripped
+            $outNoForce = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
+            $fileAfterNoForce = Get-Content -LiteralPath $setupPath -Raw
+
+            Write-Utf8NoBom -Path $setupPath -Content $stripped
+            $outForce = & $global:puw_scriptPath -RepoRoot $tmp -Force *>&1 | Out-String
+            $fileAfterForce = Get-Content -LiteralPath $setupPath -Raw
+
+            $outForce | Should Be $outNoForce
+            $fileAfterForce | Should Be $fileAfterNoForce
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'edge case: zero-byte file draws no content warning and stays byte-identical' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            [System.IO.File]::WriteAllText($setupPath, '', (New-Object System.Text.UTF8Encoding($false)))
 
             $wv = $null
-            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
-            ($wv | Out-String) | Should Match 'by hand'
+            $out = & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv *>&1 | Out-String
+            $out | Should Match 'leaving it untouched'
+            ($wv | Out-String) | Should Not Match 'worktree-setup'
+            (Get-Item -LiteralPath $setupPath).Length | Should Be 0
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'edge case: comment-only file draws no content warning and stays byte-identical' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            Write-Utf8NoBom -Path $setupPath -Content "# just a comment`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            $wv = $null
+            $out = & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv *>&1 | Out-String
+            $out | Should Match 'leaving it untouched'
+            ($wv | Out-String) | Should Not Match 'worktree-setup'
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'edge case: arbitrary unrelated YAML draws no content warning and stays byte-identical' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            Write-Utf8NoBom -Path $setupPath -Content "hello: world`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            $wv = $null
+            $out = & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv *>&1 | Out-String
+            $out | Should Match 'leaving it untouched'
+            ($wv | Out-String) | Should Not Match 'worktree-setup'
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'edge case: script-created-then-stripped block draws no content warning and stays byte-identical' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+            $content = Get-Content -LiteralPath $setupPath -Raw
+            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_CACHE_SERVER' }) -join "`n"
+            Write-Utf8NoBom -Path $setupPath -Content $stripped
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            $wv = $null
+            $out = & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv *>&1 | Out-String
+            $out | Should Match 'leaving it untouched'
+            ($wv | Out-String) | Should Not Match 'worktree-setup'
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
         } finally { Remove-TempUnityRepo $tmp }
     }
 }
@@ -758,28 +769,6 @@ Describe 'UNITY_WORKTREE_CACHE_SERVER runtime arg-filter' {
 }
 
 # ---------------------------------------------------------------------------
-Describe 'prepare-unity-worktree.ps1 — idempotency stale-block (cache server)' {
-
-    # Mirror of Fix-2b: warn when existing block predates UNITY_WORKTREE_CACHE_SERVER.
-    It 'Fix-2b-cache: emits a Write-Warning hint when existing block lacks UNITY_WORKTREE_CACHE_SERVER' {
-        $tmp = New-TempUnityRepo
-        try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
-            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-
-            # Strip every line containing UNITY_WORKTREE_CACHE_SERVER to simulate an old block.
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_CACHE_SERVER' }) -join "`n"
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
-
-            $wv = $null
-            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
-            ($wv | Out-String) | Should Match 'by hand'
-        } finally { Remove-TempUnityRepo $tmp }
-    }
-}
-
-# ---------------------------------------------------------------------------
 Describe 'managed block content — Library mirror' {
 
     It 'managed block contains UNITY_WORKTREE_MIRROR_LIBRARY reference' {
@@ -817,46 +806,6 @@ Describe 'managed block content — Library mirror' {
         $mirrorIdx | Should Not Be -1
         $startIdx  | Should Not Be -1
         ($mirrorIdx -lt $startIdx) | Should Be $true
-    }
-}
-
-# ---------------------------------------------------------------------------
-Describe 'prepare-unity-worktree.ps1 — idempotency stale-block (Library mirror)' {
-
-    # Warn when existing block predates UNITY_WORKTREE_MIRROR_LIBRARY.
-    It 'Fix-2b-mirror: emits a Write-Warning hint when existing block lacks UNITY_WORKTREE_MIRROR_LIBRARY' {
-        $tmp = New-TempUnityRepo
-        try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
-            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-
-            # Strip every line containing UNITY_WORKTREE_MIRROR_LIBRARY to simulate an old block.
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'UNITY_WORKTREE_MIRROR_LIBRARY' }) -join "`n"
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
-
-            $wv = $null
-            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
-            ($wv | Out-String) | Should Match 'by hand'
-        } finally { Remove-TempUnityRepo $tmp }
-    }
-}
-
-# ---------------------------------------------------------------------------
-Describe 'prepare-unity-worktree.ps1 — idempotency stale-block (GUI dialog caveat)' {
-
-    It 'Fix-2b-gui-dialog: emits a Write-Warning hint when existing block lacks GUI dialog caveat' {
-        $tmp = New-TempUnityRepo
-        try {
-            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
-            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $stripped = ($content -split "`n" | Where-Object { $_ -notmatch 'does not suppress' }) -join "`n"
-            Write-Utf8NoBom -Path $setupPath -Content $stripped
-            $wv = $null
-            & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
-            ($wv | Out-String) | Should Match 'by hand'
-        } finally { Remove-TempUnityRepo $tmp }
     }
 }
 

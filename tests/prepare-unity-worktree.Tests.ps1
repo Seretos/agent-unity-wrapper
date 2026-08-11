@@ -221,52 +221,200 @@ Describe 'prepare-unity-worktree.ps1 — Packages/manifest.json handling' {
 }
 
 # ---------------------------------------------------------------------------
-# Ticket #28 (R4) — F2 (isolation flip on append) is retained and untouched by
-# the -Force-never-rewrites-the-managed-block change. F2 had zero coverage
-# before this ticket.
-Describe 'prepare-unity-worktree.ps1 — isolation flip on append (-Force, F2 - retained)' {
+# Ticket #37 — existence-based ownership. Once .seretos/worktree-setup.yml
+# exists, the script never writes to it again: no append, no isolation flip,
+# no reconcile, under any flag. This supersedes the #28 "isolation flip on
+# append" behaviour entirely (that append branch is removed, not just
+# Force-gated).
+Describe 'prepare-unity-worktree.ps1 — existence-based ownership (ticket #37)' {
 
-    It '-Force flips isolation: partial to full when appending to a contract with no start/stop' {
+    It 'ticket-37: -Force does not flip isolation and does not append' {
         $tmp = New-TempUnityRepo
         try {
             $setupDir = Join-Path $tmp '.seretos'
             New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
             $setupPath = Join-Path $setupDir 'worktree-setup.yml'
             Write-Utf8NoBom -Path $setupPath -Content "version: 1`nisolation: partial`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
 
             & $global:puw_scriptPath -RepoRoot $tmp -Force | Out-Null
 
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $content | Should Match 'isolation: full'
-            $content | Should Match '>>> agent-unity-wrapper managed'
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+            $after | Should Match 'isolation: partial'
+            $after | Should Not Match 'isolation: full'
+            $after | Should Not Match '>>> agent-unity-wrapper managed'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    It 'without -Force, isolation: partial throws instead of flipping' {
+    It 'ticket-37: script source no longer contains the isolation-flip messages' {
+        $src = [System.IO.File]::ReadAllText($global:puw_scriptPath)
+        $src | Should Not Match 'Flipped isolation'
+        $src | Should Not Match 'Re-run with -Force to flip'
+    }
+
+    It 'ticket-37: existing contract with no start/stop is never appended to (no -Force)' {
         $tmp = New-TempUnityRepo
         try {
             $setupDir = Join-Path $tmp '.seretos'
             New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
             $setupPath = Join-Path $setupDir 'worktree-setup.yml'
             Write-Utf8NoBom -Path $setupPath -Content "version: 1`nisolation: partial`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
 
-            # Note: Pester 3.4's `{ } | Should Throw` matcher does not reliably detect
-            # terminating errors raised by an externally-invoked script in this
-            # environment (confirmed with even a bare `{ throw "x" } | Should Throw`
-            # failing) - use an explicit try/catch instead.
             $threw = $false
-            $msg = ''
+            $out = $null
             try {
-                & $global:puw_scriptPath -RepoRoot $tmp
+                $out = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
             } catch {
                 $threw = $true
-                $msg = $_.Exception.Message
             }
-            $threw | Should Be $true
-            $msg | Should Match 'isolation'
+            $threw | Should Be $false
 
-            $content = Get-Content -LiteralPath $setupPath -Raw
-            $content | Should Not Match '>>> agent-unity-wrapper managed'
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+            $after | Should Not Match '>>> agent-unity-wrapper managed'
+
+            # Advisory: warns and prints the template for manual paste instead of writing.
+            $out | Should Match 'by hand'
+            $out | Should Match 'agent-unity-wrapper managed'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'ticket-37: existing contract with isolation: full and no start/stop is never appended to' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            Write-Utf8NoBom -Path $setupPath -Content "version: 1`nisolation: full`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'ticket-37: arbitrary unrelated YAML is never written to' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            Write-Utf8NoBom -Path $setupPath -Content "hello: world`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            $threw = $false
+            try {
+                & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            } catch {
+                $threw = $true
+            }
+            $threw | Should Be $false
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'ticket-37: a zero-byte file counts as existing and is never written to' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            [System.IO.File]::WriteAllText($setupPath, '', (New-Object System.Text.UTF8Encoding($false)))
+            (Get-Item -LiteralPath $setupPath).Length | Should Be 0
+
+            $threw = $false
+            try {
+                & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            } catch {
+                $threw = $true
+            }
+            $threw | Should Be $false
+
+            (Get-Item -LiteralPath $setupPath).Length | Should Be 0
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'ticket-37: a comment-only file is never written to' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            Write-Utf8NoBom -Path $setupPath -Content "# just a comment`n"
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            $threw = $false
+            try {
+                & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            } catch {
+                $threw = $true
+            }
+            $threw | Should Be $false
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'ticket-37: script does not classify by marker match' {
+        $src = [System.IO.File]::ReadAllText($global:puw_scriptPath)
+        $src | Should Not Match ([regex]::Escape('[regex]::Escape($startMarker)'))
+        $src | Should Not Match ([regex]::Escape('$startMarker ='))
+        $src | Should Not Match ([regex]::Escape('$endMarker ='))
+        ([regex]::Matches($src, [regex]::Escape('Write-Utf8NoBom -Path $setupPath')).Count) | Should Be 1
+    }
+
+    It 'ticket-37: managed block marker does not claim the block must not be edited' {
+        $global:puw_managedBlock | Should Not Match 'do not edit'
+        $global:puw_managedBlock | Should Match 'edit it freely'
+    }
+
+    # Codex correctness finding on the #37 fix cycle: the whole-file token scan can be
+    # fooled by a foreign/partially-adapted file that happens to contain all six current
+    # tokens without ever defining an actually-usable start:/stop: block. The advisory
+    # predicate must also fire on this structural gap (no start:/stop: keys at all) -
+    # not by recognising the plugin's own markers, just by checking the contract's shape.
+    It 'ticket-37: fix-gap: all six tokens present but no start/stop keys still triggers the advisory' {
+        $tmp = New-TempUnityRepo
+        try {
+            $setupDir = Join-Path $tmp '.seretos'
+            New-Item -ItemType Directory -Path $setupDir -Force | Out-Null
+            $setupPath = Join-Path $setupDir 'worktree-setup.yml'
+            # Deliberately contains every token the whole-file heuristic checks for, but
+            # defines no start:/stop: steps at all - the "misclassified as current" gap.
+            $fixture = @'
+version: 1
+isolation: full
+
+# name: gui
+# UNITY_WORKTREE_CACHE_SERVER
+# UNITY_WORKTREE_MIRROR_LIBRARY
+# UNITY_MCP_ALLOW_BATCH=1 does not suppress
+# COLD START
+'@
+            Write-Utf8NoBom -Path $setupPath -Content $fixture
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            $threw = $false
+            $out = $null
+            try {
+                $out = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
+            } catch {
+                $threw = $true
+            }
+            $threw | Should Be $false
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+
+            $out | Should Match 'by hand'
+            $out | Should Match 'agent-unity-wrapper managed'
         } finally { Remove-TempUnityRepo $tmp }
     }
 }
@@ -322,7 +470,7 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
             & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
             $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
             $content = Get-Content -LiteralPath $setupPath -Raw
-            $blockStartMarker = '# >>> agent-unity-wrapper managed: per-worktree Unity bridge (do not edit between markers)'
+            $blockStartMarker = ($content -split "`n" | Where-Object { $_ -match '^# >>> agent-unity-wrapper managed' } | Select-Object -First 1)
             $blockEndMarker   = '# <<< agent-unity-wrapper managed'
             $sIdx = $content.IndexOf($blockStartMarker)
             $eIdx = $content.IndexOf($blockEndMarker, $sIdx)
@@ -397,7 +545,42 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
         } finally { Remove-TempUnityRepo $tmp }
     }
 
-    It 'foreign hand-written start/stop block: prints managed block for manual merge and throws' {
+    # Ticket #37 — a foreign start:/stop: block is no longer a "manual merge
+    # required" error: the script reads the file, advises, prints the template
+    # for manual paste, and exits 0 like every other "file already exists" case.
+    It 'ticket-37: foreign start/stop block is printed for manual paste, never throws, exits 0' {
+        $tmp = New-TempUnityRepo
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $tmp '.seretos') -Force | Out-Null
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+            $foreign = "version: 1`nisolation: full`n`nstart:`n  - name: custom`n    shell: pwsh`n    run: echo hi`nstop:`n  - name: custom-stop`n    shell: pwsh`n    run: echo bye`n"
+            Write-Utf8NoBom -Path $setupPath -Content $foreign
+            $before = Get-Content -LiteralPath $setupPath -Raw
+
+            # In-process: must not throw, and prints the template for manual paste.
+            $threw = $false
+            $out = $null
+            try {
+                $out = & $global:puw_scriptPath -RepoRoot $tmp *>&1 | Out-String
+            } catch {
+                $threw = $true
+            }
+            $threw | Should Be $false
+            $out | Should Match 'agent-unity-wrapper managed'
+            $out | Should Match 'by hand'
+
+            $after = Get-Content -LiteralPath $setupPath -Raw
+            $after | Should Be $before
+
+            # Exit-code check: run as a child process to confirm a clean exit 0.
+            & powershell -NoProfile -File $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $LASTEXITCODE | Should Be 0
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    # Ticket #37 — sections 2/3 (manifest + .gitignore) are no longer aborted by
+    # the foreign-contract case now that the throw is gone.
+    It 'ticket-37: foreign start/stop block does not abort manifest.json / .gitignore preparation' {
         $tmp = New-TempUnityRepo
         try {
             New-Item -ItemType Directory -Path (Join-Path $tmp '.seretos') -Force | Out-Null
@@ -405,24 +588,18 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
             $foreign = "version: 1`nisolation: full`n`nstart:`n  - name: custom`n    shell: pwsh`n    run: echo hi`nstop:`n  - name: custom-stop`n    shell: pwsh`n    run: echo bye`n"
             Write-Utf8NoBom -Path $setupPath -Content $foreign
 
-            # Content check: run as a child process so output already printed before the
-            # throw survives the terminating error (an in-process piped assignment would not).
-            $out = & powershell -NoProfile -File $global:puw_scriptPath -RepoRoot $tmp 2>&1 | Out-String
-            $out | Should Match 'agent-unity-wrapper managed'
-            $out | Should Match 'by hand'
+            New-Item -ItemType Directory -Path (Join-Path $tmp 'Packages') | Out-Null
+            $mp = Join-Path $tmp 'Packages\manifest.json'
+            Write-Utf8NoBom -Path $mp -Content '{"dependencies":{}}'
 
-            # Behavioural check: the in-process invocation throws (frozen by the ticket).
-            # Note: Pester 3.4's `{ } | Should Throw` matcher does not reliably detect
-            # terminating errors raised by an externally-invoked script in this
-            # environment (confirmed with even a bare `{ throw "x" } | Should Throw`
-            # failing) - use an explicit try/catch instead.
-            $threw = $false
-            try {
-                & $global:puw_scriptPath -RepoRoot $tmp
-            } catch {
-                $threw = $true
-            }
-            $threw | Should Be $true
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+
+            $obj = Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
+            $obj.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v9\.7\.1'
+
+            $giPath = Join-Path $tmp '.gitignore'
+            Test-Path $giPath | Should Be $true
+            (Get-Content -LiteralPath $giPath -Raw) | Should Match '\.unity-mcp/'
         } finally { Remove-TempUnityRepo $tmp }
     }
 

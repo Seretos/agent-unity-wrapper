@@ -302,3 +302,24 @@ Describe 'SKILL.md -- recipes call tools by name (ticket #33)' {
         $recipesSection | Should Match '\[VisualVerify\] Screenshot saved'
     }
 }
+
+Describe 'SKILL.md -- existence-based ownership of worktree-setup.yml (ticket #37)' {
+
+    It 'does not claim that -Force flips isolation' {
+        $global:skillmd_text | Should Not Match 'Force.{0,40}flip'
+        $global:skillmd_text | Should Not Match 'flip.{0,40}isolation'
+    }
+
+    It 'does not claim -Force appends the managed block to a contract with no start/stop' {
+        $global:skillmd_text | Should Not Match 'appending to a contract'
+    }
+
+    It 'states the file is created only when absent' {
+        $global:skillmd_text | Should Match 'the file is absent, it creates it'
+    }
+
+    It 'states the file is never written to once it exists, under any flag' {
+        $global:skillmd_text | Should Match 'never write[s]? to it again'
+        $global:skillmd_text | Should Match 'under any flag'
+    }
+}

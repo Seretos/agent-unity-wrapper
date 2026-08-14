@@ -42,6 +42,7 @@ Describe '.gitattributes -- resolves eol=lf for every Claude-parsed file (Behavi
         'CLAUDE.md',
         '.claude/settings.json',
         'skills/unity-wrapper/SKILL.md',
+        'skills/unity-yaml-merge/SKILL.md',
         '.claude-plugin/plugin.json',
         '.codex-plugin/plugin.json'
     )
@@ -61,6 +62,10 @@ Describe '.gitattributes -- resolves eol=lf for every Claude-parsed file (Behavi
     It 'skills/unity-wrapper/SKILL.md resolves text=auto eol=lf' {
         $attrs['skills/unity-wrapper/SKILL.md']['text'] | Should Be 'auto'
         $attrs['skills/unity-wrapper/SKILL.md']['eol']  | Should Be 'lf'
+    }
+    It 'skills/unity-yaml-merge/SKILL.md resolves text=auto eol=lf' {
+        $attrs['skills/unity-yaml-merge/SKILL.md']['text'] | Should Be 'auto'
+        $attrs['skills/unity-yaml-merge/SKILL.md']['eol']  | Should Be 'lf'
     }
     It '.claude-plugin/plugin.json resolves text=auto eol=lf' {
         $attrs['.claude-plugin/plugin.json']['text'] | Should Be 'auto'

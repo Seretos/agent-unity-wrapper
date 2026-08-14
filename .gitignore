@@ -4,3 +4,5 @@
 Thumbs.db
 *.log
 .process-ticket-result.json
+__pycache__/
+*.pyc

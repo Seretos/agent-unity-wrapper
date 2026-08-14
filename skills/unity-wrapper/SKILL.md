@@ -12,6 +12,10 @@ graph, locating or editing GameObjects and components, or inspecting assets. The
 routes that work through the Unity MCP server's structured tools rather than reading or
 guessing at serialized scene/asset files.
 
+For git-merging serialized Unity assets (scenes, prefabs, and other YAML asset types),
+see the `unity-yaml-merge` skill instead — that is a separate concern from driving the
+live editor.
+
 ## Mental model
 
 The Unity MCP has two halves that must both be running for any tool call to succeed:

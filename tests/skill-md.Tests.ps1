@@ -348,3 +348,18 @@ Describe 'SKILL.md -- no content inspection of an existing worktree-setup.yml (t
         $global:skillmd_text | Should Not Match 'appending to a contract'
     }
 }
+
+# --- ticket #41: cross-reference to the new unity-yaml-merge skill ---------
+
+Describe 'SKILL.md -- cross-references unity-yaml-merge; frontmatter stays clean (ticket #41)' {
+    $section     = Get-Section -Text $global:skillmd_text -Heading '## What this skill is for'
+    $description = Get-FrontmatterDescription -Text $global:skillmd_text
+
+    It '"What this skill is for" points to the unity-yaml-merge skill for git-merging serialized assets' {
+        $section | Should Match 'unity-yaml-merge'
+    }
+
+    It 'frontmatter description stays free of merge-driver phrasing (disjoint trigger surfaces)' {
+        $description | Should Not Match '(?i)unityyamlmerge|merge driver|gitattributes'
+    }
+}

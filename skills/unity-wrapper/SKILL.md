@@ -1,6 +1,6 @@
 ---
 name: unity-wrapper
-description: Drive the Unity editor through the external Unity MCP server (server key unityMCP) — inspect and edit scenes, GameObjects, components and assets, enter and exit Play mode, capture screenshots, run Unity Test Runner tests (run_tests, EditMode and PlayMode), and read the Unity console for compilation errors after a script write, instead of guessing project state. Also covers booting a per-worktree Unity editor with worktree_start (headless vs GUI variants, UNITY_MCP_STATUS_DIR isolation), cold-start Library re-import expectations and acceleration, standalone builds, and recovering when a tool call reports no Unity Editor instances or Unity refuses to open a project because of a stale Temp/UnityLockfile. Use when working inside a Unity project, starting or connecting to a Unity editor, or when a Unity MCP tool call fails.
+description: Drive the Unity editor through the external Unity MCP server (server key unityMCP) — inspect and edit scenes, GameObjects, components and assets, enter and exit Play mode, capture screenshots, run Unity Test Runner tests (run_tests, EditMode and PlayMode), and read the Unity console for compilation errors after a script write, instead of guessing project state. Also covers booting a per-worktree Unity editor with environment_start (headless vs GUI variants, UNITY_MCP_STATUS_DIR isolation), cold-start Library re-import expectations and acceleration, standalone builds, and recovering when a tool call reports no Unity Editor instances or Unity refuses to open a project because of a stale Temp/UnityLockfile. Use when working inside a Unity project, starting or connecting to a Unity editor, or when a Unity MCP tool call fails.
 ---
 
 # unity-wrapper
@@ -94,7 +94,7 @@ Further groups exist for domain work — `vfx` (`manage_vfx`, `manage_shader`, `
 ## Patterns and recipes
 
 Play-mode screenshots are available as a capability: with Unity booted under
-`worktree_start variant=gui`, an agent can capture the running scene to
+`environment_start variant=gui`, an agent can capture the running scene to
 `<worktree>/.unity-mcp/screenshot.png`. Capture one when a human will want to see the
 result. See "Capture a screenshot from Play mode" below.
 
@@ -156,7 +156,7 @@ framing/output paths.
 mode (`-batchmode -nographics`), `ScreenCapture.CaptureScreenshot` produces no output and
 the display subsystem is not initialized, so the RenderTexture path also produces a blank
 image on headless configurations without a display subsystem. Boot with
-`worktree_start variant=gui` before executing the recipe below.
+`environment_start variant=gui` before executing the recipe below.
 
 **Recipe — execute via `execute_code`:**
 
@@ -203,7 +203,7 @@ UnityEngine.Debug.Log($"[VisualVerify] Screenshot saved: {outputPath}");
 
 **Step-by-step workflow:**
 
-1. Boot with `worktree_start variant=gui` (GUI mode is required — see prerequisite above).
+1. Boot with `environment_start variant=gui` (GUI mode is required — see prerequisite above).
 2. Wait for `unity-mcp-status-*.json` to appear in `.unity-mcp/` (bridge ready signal).
 3. Enter Play mode via `manage_editor action=play` and wait for the transition to complete.
 4. Allow the scene one or two frames to finish its startup sequence (if the project has a
@@ -224,12 +224,25 @@ directory is always present when the bridge is up (it is the status dir), so no 
 creation step is needed. Overwriting a previous capture is intentional — rename if you
 need to retain multiple captures.
 
-## Per-worktree Unity instances (worktree gate)
+## Unity environments (worktree, main checkout, adopted)
 
-When the session runs inside a **git worktree** (via `agent-worktree`), each worktree
-needs its **own** Unity Editor instance, and this session's MCP server must bind to
-*that* instance with no manual "select instance" UI step. This is achieved with
-**status-dir isolation** — no runtime routing logic in the skill.
+`agent-worktree`'s Environment model addresses **three** kinds of Unity target the same
+way — a linked worktree, the repo's own main checkout, or an editor someone already
+started by hand through Unity Hub:
+
+1. **Linked worktree** — `environment_start environment_id=<id> variant=default|gui`.
+   Each worktree needs its **own** Unity Editor instance, and this session's MCP server
+   must bind to *that* instance with no manual "select instance" UI step.
+2. **Main checkout** — `environment_start checkout_path=<repo root> variant=default|gui`.
+   Addresses the repo's own primary clone directly (no linked worktree involved) — the
+   same `start:`/`stop:` contract runs there, with `<repo root>` standing in for
+   `<worktree>` everywhere in this document.
+3. **Unity Hub adoption** — a human (or a prior session) already started Unity through
+   Hub, outside any `environment_start` call. See "Unity Hub adoption" below — this case
+   needs no `environment_start` call at all.
+
+All three are achieved with **status-dir isolation** — no runtime routing logic in the
+skill.
 
 ### Status-dir isolation contract
 
@@ -248,6 +261,74 @@ expansion, no relative-path rewriting on the Unity side), so the editor launch m
 an **absolute** path. When both sides resolve to the same directory, the server discovers
 **exactly one** instance and auto-connects.
 
+**No manifest change needed for the Environment model (ticket #47).** The manifests'
+`UNITY_MCP_STATUS_DIR` above already reads as `<checkout>/.unity-mcp` on both hosts, and
+"checkout" is exactly as true for the main checkout (`${CLAUDE_PROJECT_DIR}` = the repo
+root when `environment_start` addresses it via `checkout_path=`) as it is for a linked
+worktree (`${CLAUDE_PROJECT_DIR}` = the worktree root) — both cases resolve to the same
+`<checkout>/.unity-mcp` pattern, so `.claude-plugin/plugin.json` and
+`.codex-plugin/plugin.json` needed no edits for this migration.
+
+### Unity Hub adoption
+
+A Unity Editor a human started directly through **Unity Hub** — not via `environment_start`
+— writes its status/port files into the **global** `~/.unity-mcp` directory (see Pitfall 5),
+not the checkout-local one, so this session's MCP server would normally find no instance.
+**Adoption** closes that gap: it symlinks the matching Hub instance's
+`unity-mcp-status-*.json` and `unity-mcp-port-*.json` files into `<checkout>/.unity-mcp`,
+so the same status-dir isolation contract above picks it up with no manual "select
+instance" step and no separate marker file — a symlink is self-identifying. A match
+requires the Hub instance's `project_path` to resolve to `<checkout>/Assets`, a heartbeat
+no older than 60 s, and a successful TCP connect to its reported port within 500 ms; a
+stale or dangling adopted link is cleaned up unconditionally before every adoption pass,
+whether or not a new candidate is found.
+
+Adoption is reached from **two** entry points, both running the same logic generated into
+`<checkout>/.seretos/unity-mcp-launch.ps1` by `scripts/prepare-unity-worktree.ps1`:
+
+- **Claude Code — automatic, no agent action.** A `SessionStart` hook
+  (`hooks/hooks.json` → `hooks/session-start-adopt.ps1`) runs the adoption pass at the
+  start of every session, before any tool call. It exits silently on a project that has
+  not been prepared for the Unity MCP bridge, so a non-Unity project sees no hook noise.
+- **Both hosts — via the launcher.** `environment_start`'s own `default`/`gui` steps run
+  the identical adoption pass as their preamble before deciding whether to launch a new
+  Unity process at all (already-connected to an adopted or prior instance → no launch).
+
+**Codex has no hook surface — this is Claude Code only for automatic discovery.** A Codex
+session never gets the SessionStart pass, so on Codex a Hub-started editor is discovered
+only when `environment_start` next runs (its launcher-preamble path above still adopts it
+before deciding to launch), or by running `.seretos/unity-mcp-launch.ps1 -AdoptOnly
+-CheckoutPath <path>` by hand. Do not assume Codex gets the same "found with no agent
+action" guarantee that Claude Code's hook provides.
+
+**Creating the symlink requires privilege on Windows.** If the account running the session
+lacks Developer Mode or Administrator rights, symlink creation fails and adoption fails
+loudly with a message naming the exact remedy (enable Developer Mode, or run elevated) —
+it does not silently fall back to copying the status file (a copied heartbeat would go
+stale without ever being refreshed by the adopted instance).
+
+### Version-pin strategy
+
+The Python MCP server is pinned `mcpforunityserver==9.7.1` in both manifests
+(`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`), and the same value is the
+`-UnityMcpVersion` default in `scripts/prepare-unity-worktree.ps1` (which pins the
+`com.coplaydev.unity-mcp` bridge package a target Unity project depends on). A test
+(`tests/prepare-unity-worktree.Tests.ps1`) asserts these three values agree with each
+other — but that only proves **internal** consistency across this plugin's own
+manifests/script, never that the pin matches whatever `mcpforunityserver` build is
+actually installed and running for a given session, or whatever bridge-package commit a
+given target Unity project happens to have checked out.
+
+To check for drift: read the bridge-reported server version — the C# bridge logs its own
+version and the expected server version on connect (check `<checkout>/.unity-mcp/editor.log`
+or the Unity console), or call a Unity MCP tool that surfaces version info if the bridge
+exposes one — and compare it against the `mcpforunityserver==X` pin above. A mismatch
+between the bridge-reported version and the pin is a real signal (an out-of-date bridge
+package in the target Unity project, or an out-of-date pin in this plugin) and is worth
+investigating even though nothing here checks for it automatically; reconcile by either
+updating `Packages/manifest.json`'s `com.coplaydev.unity-mcp` pin (`-Force` on the
+prepare-script) or filing a ticket to bump the manifests' pin, whichever side is stale.
+
 ### When to boot (opt-in)
 
 Preparing the worktree (running the prepare-script and committing the result) does **not**
@@ -255,12 +336,12 @@ require booting Unity. The decision point is whether the ticket actually needs t
 editor at all:
 
 - **Editor-touching tickets** (scene edits, component changes, Play-mode testing, asset
-  inspection): run `worktree_start` to execute the `start:` block and boot Unity, then
+  inspection): run `environment_start` to execute the `start:` block and boot Unity, then
   proceed with MCP tool calls.
 - **Backend / non-editor tickets** (pure C# logic, server code, CI config, etc.): skip
-  `worktree_start` entirely — zero Unity processes, zero resource cost.
+  `environment_start` entirely — zero Unity processes, zero resource cost.
 
-`worktree_stop` tears Unity down cleanly and is safe to call even if Unity was never
+`environment_stop` tears Unity down cleanly and is safe to call even if Unity was never
 started — the stop script is guarded by a pid-file existence check and exits silently when
 the pid file is absent.
 
@@ -302,7 +383,7 @@ the launched start/stop steps.
 
 ### Launch flow
 
-1. `worktree_start` (agent-worktree) runs the matching `start` step variant:
+1. `environment_start` (agent-worktree) runs the matching `start` step variant:
    - **`default`** (no variant arg, or `variant=default`): launches a **headless** Unity
      (`-batchmode -nographics -projectPath <worktree>`) — correct for CI and automated MCP
      tool calls.
@@ -318,7 +399,7 @@ the launched start/stop steps.
    that directory is the authoritative readiness signal — once it exists, the bridge is
    up. This session's MCP server (pointed at the same dir) discovers the one instance
    and auto-connects.
-3. `worktree_stop` runs the `stop` step → kills the recorded Unity PID.
+3. `environment_stop` runs the `stop` step → kills the recorded Unity PID.
 
 Set `UNITY_EDITOR_PATH` to your Unity Editor binary to override editor resolution; if unset,
 the start step derives the version from `ProjectSettings/ProjectVersion.txt` and looks under
@@ -328,10 +409,10 @@ the Unity Hub default install path.
 
 On a fresh worktree with no `Library/` and no acceleration active, Unity must re-import
 every asset from scratch. **Expected duration: 5–65 min on asset-heavy projects** — plan
-accordingly before calling `worktree_start`.
+accordingly before calling `environment_start`.
 
 To reduce or eliminate the cold-import cost, set one or both of the following environment
-variables **before** calling `worktree_start`:
+variables **before** calling `environment_start`:
 
 | Env var | What it does | When to use |
 |---|---|---|
@@ -363,13 +444,13 @@ wait time is expected rather than a surprise.
 
 ### GUI / interactive launch
 
-By default `worktree_start` boots Unity **headless** (`-batchmode -nographics`), which is
+By default `environment_start` boots Unity **headless** (`-batchmode -nographics`), which is
 the correct mode for CI and automated MCP tool calls. When you need a visible editor
 (interactive editing, visual debugging, Play-mode with graphics), use the named `gui`
 variant:
 
 ```
-worktree_start worktree_id=<id> variant=gui
+environment_start environment_id=<id> variant=gui
 ```
 
 No environment variable is needed. The `gui` start step runs the same launch sequence as
@@ -398,6 +479,18 @@ full editor UI loads, which costs more memory and startup time than headless mod
 > commit. Re-running with `-Force` will not do it for you. A freshly-prepared repo already
 > has both steps and needs no special action.
 
+> **Repos prepared before the launcher extraction (ticket #47):** the managed block's
+> `start:` steps used to carry the full launch body inline; they are now a thin call into
+> the generated `.seretos/unity-mcp-launch.ps1` script (resolve `$proj`, then run
+> `.seretos/unity-mcp-launch.ps1 -Variant default|gui -CheckoutPath $proj`). Per the same
+> existence-based ownership rule above, `prepare-unity-worktree.ps1` never rewrites an
+> existing `.seretos/worktree-setup.yml` — not even to shrink an old inline `start:` body
+> down to the new call-site — so a repo prepared before this ticket keeps its old inline
+> body forever unless someone hand-merges it. To adopt the new launcher call-site, copy the
+> shrunken `start:` steps out of `scripts/prepare-unity-worktree.ps1`'s `$managedBlock` and
+> merge them into the managed region by hand, the same one-time procedure as above. A
+> freshly-prepared repo already has the thin call-site and needs no action.
+
 ### Headless vs. GUI — automation workflow
 
 - **Headless is the correct mode for all automated and agent-driven phases.** In
@@ -408,7 +501,7 @@ full editor UI loads, which costs more memory and startup time than headless mod
   asset writes, etc.) can produce blocking modal dialogs that halt Unity's main thread and
   hang all in-flight MCP calls until a human dismisses the dialog.
 - **Recommended workflow:** run headless for all automated or agent-driven phases →
-  `worktree_stop` → relaunch with `variant=gui` for human review → `worktree_stop` the
+  `environment_stop` → relaunch with `variant=gui` for human review → `environment_stop` the
   GUI instance before resuming automated work.
 - The long-term fix (non-interactive bridge save APIs) is an upstream
   `CoplayDev/unity-mcp` concern and is tracked separately.
@@ -429,29 +522,29 @@ open the same project").
 
 **Recipe — run a standalone build while a session is active:**
 
-1. `worktree_stop` — terminate the running MCP or GUI session to release the
+1. `environment_stop` — terminate the running MCP or GUI session to release the
    lockfile.
 2. Run your standalone build script (the separate `-batchmode -quit` process
    writes the artifact and exits, releasing the lock).
-3. `worktree_start variant=gui` (or `default`) — bring the editor back up
+3. `environment_start variant=gui` (or `default`) — bring the editor back up
    afterwards if you need to continue working.
 
 > **Disambiguating the two lockfile-error cases:** the error
 > `HandleProjectAlreadyOpenInAnotherInstance` appears in two distinct situations.
 > Here it means an *active* session legitimately holds the lock — resolve it with
-> `worktree_stop` as shown above. If the error appears after a force-killed
+> `environment_stop` as shown above. If the error appears after a force-killed
 > editor with *no* active session, the cause is a *stale* `Temp/UnityLockfile`
 > left behind — see the **"Stale-lockfile trap"** note below for that case.
 
 ### Cache Server (faster cold starts)
 
-On asset-heavy projects, `worktree_start` triggers a full asset re-import into the
+On asset-heavy projects, `environment_start` triggers a full asset re-import into the
 worktree-local `Library/` on first open. This can take several minutes before the C#
 bridge reports `ready`, and the cost is paid again for every new worktree. A Unity Cache
 Server (legacy protocol) or Unity Accelerator (same wire protocol) caches compiled import
 artefacts so subsequent worktrees pull from the cache instead of reimporting from scratch.
 
-To opt in, set the environment variable **before** calling `worktree_start`:
+To opt in, set the environment variable **before** calling `environment_start`:
 
 ```
 $env:UNITY_WORKTREE_CACHE_SERVER = 'localhost:10080'   # PowerShell
@@ -516,19 +609,19 @@ CI host is a separate step — see
 
 When a Unity Cache Server or Accelerator is not available, you can reduce cold-import
 time by pre-populating a new worktree's `Library/` from the main checkout before
-`worktree_start` opens Unity there. This is a lightweight, zero-infrastructure
+`environment_start` opens Unity there. This is a lightweight, zero-infrastructure
 alternative to the Cache Server path (see above and #7). It is best-effort only — Unity
 may still reimport some or all assets depending on what has changed between the main
 checkout and the worktree branch.
 
-**To activate it, set `UNITY_WORKTREE_MIRROR_LIBRARY` to `'1'` before calling `worktree_start`:**
+**To activate it, set `UNITY_WORKTREE_MIRROR_LIBRARY` to `'1'` before calling `environment_start`:**
 
 ```powershell
 $env:UNITY_WORKTREE_MIRROR_LIBRARY = '1'
 ```
 
-Then call the `worktree_start` MCP tool (with optional `variant=gui` for a visible editor).
-After `worktree_start` returns, clear the variable if you do not want subsequent starts to mirror:
+Then call the `environment_start` MCP tool (with optional `variant=gui` for a visible editor).
+After `environment_start` returns, clear the variable if you do not want subsequent starts to mirror:
 
 ```powershell
 Remove-Item Env:UNITY_WORKTREE_MIRROR_LIBRARY -ErrorAction SilentlyContinue
@@ -559,7 +652,7 @@ change in behaviour for repos that do not opt in.
 `<worktree>/Temp/UnityLockfile`. Unity refuses to open the project while this file
 exists, logging `HandleProjectAlreadyOpenInAnotherInstance`. The managed `start:` block
 does not automatically clear the worktree lockfile — remove it manually before calling
-`worktree_start` if the previous run was force-killed.
+`environment_start` if the previous run was force-killed.
 
 **Honest caveat — this is best-effort, not guaranteed.** Real-world outcomes vary
 depending on how much has changed since the mirrored `Library/` was built:
@@ -573,14 +666,14 @@ Mirroring may help or may not, depending on how much has changed since the `Libr
 was built. When it works, it can save several minutes; when it does not, the only cost
 is the time spent copying.
 
-The robust primary flow is plain `worktree_start` (headless, no extra env vars required):
-call `worktree_start` and poll until a `unity-mcp-status-*.json` file appears in the
+The robust primary flow is plain `environment_start` (headless, no extra env vars required):
+call `environment_start` and poll until a `unity-mcp-status-*.json` file appears in the
 worktree-local `.unity-mcp/` directory — this is the authoritative readiness signal,
 preferred over parsing `editor.log` for the `StartStdioForCi` banner. If a visible
 editor is needed (interactive editing, visual debugging, Play-mode with graphics), use
-`worktree_start variant=gui` — but GUI mode is an optional variant, not a requirement
+`environment_start variant=gui` — but GUI mode is an optional variant, not a requirement
 for reliable MCP usage. Mirroring is an optional accelerator applied *before*
-`worktree_start` (by the managed start step), not a replacement for the documented launch
+`environment_start` (by the managed start step), not a replacement for the documented launch
 flow.
 
 > **Repos prepared before this feature was added:** the `UNITY_WORKTREE_MIRROR_LIBRARY`
@@ -609,7 +702,7 @@ branch switches, see the Cache Server section above.
    **This is not fatal to the session.** The Python server rediscovers Unity instances by
    rescanning `UNITY_MCP_STATUS_DIR` on **every call** — only the status *directory* is
    fixed when the server starts, never a particular editor instance. So:
-   - **On that error →** run `worktree_start`, wait for a `unity-mcp-status-*.json` file
+   - **On that error →** run `environment_start`, wait for a `unity-mcp-status-*.json` file
      to appear in `<worktree>/.unity-mcp/` (the readiness signal described under "Launch
      flow"), then **retry the same call**.
    - **No session restart, no host reconnect, no re-adding the MCP server.** A Unity that
@@ -638,24 +731,29 @@ branch switches, see the Cache Server section above.
    manifest — it would break the plugin for every other user. The one env the manifest
    *does* set, `UNITY_MCP_STATUS_DIR`, is intentional and host-portable
    (`${CLAUDE_PROJECT_DIR}/.unity-mcp` on Claude, cwd-relative `.unity-mcp` on Codex) — it
-   enables per-worktree status-dir isolation (see "Per-worktree Unity instances"), not a
-   hardcoded path.
+   enables per-checkout status-dir isolation (see "Unity environments (worktree, main
+   checkout, adopted)"), not a hardcoded path.
 
-5. **Raw `Unity.exe` start is invisible to this session's MCP server.** Launching the
-   editor directly does not set `UNITY_MCP_STATUS_DIR`, so the bridge writes its status
-   file into the global `~/.unity-mcp` instead of the worktree-local `.unity-mcp`. This
-   session's MCP server finds no instance and every tool call fails with the same
+5. **Raw `Unity.exe` start is invisible to this session's MCP server — unless adopted.**
+   Launching the editor directly (including through Unity Hub) does not set
+   `UNITY_MCP_STATUS_DIR`, so the bridge writes its status file into the global
+   `~/.unity-mcp` instead of the checkout-local `.unity-mcp`. This session's MCP server
+   finds no instance and every tool call fails with the same
    `No Unity Editor instances found. Please ensure Unity is running with MCP for Unity bridge.`
    error as in Pitfall 1 — but unlike the ordinary case, **retrying will keep failing** no
    matter how long Unity has been up, because the bridge wrote its status file to the
-   wrong directory. Stop the raw editor and restart it via `worktree_start`. Always start
-   via `worktree_start`.
+   wrong directory. Two fixes: stop the raw editor and restart it via `environment_start`
+   (`checkout_path=<repo root>` for the main checkout, `environment_id=<id>` for a linked
+   worktree); or, for a Unity Hub-started editor specifically, run **Unity Hub adoption**
+   (below) instead of restarting it — a fresh Claude Code session does this automatically,
+   and `environment_start` itself runs the same adoption pass before deciding whether to
+   launch a new process.
 
 6. **Test Runner can freeze the editor.**
    On some Unity projects the Test Runner triggers a SQLite flush or a domain reload that
    hangs the editor process. If `run_tests` freezes or the editor becomes unresponsive
    during a test run, do not retry it: kill the Unity process, remove the stale
-   `<worktree>/Temp/UnityLockfile`, and restart with `worktree_start`. A cold-start
+   `<worktree>/Temp/UnityLockfile`, and restart with `environment_start`. A cold-start
    Library re-import takes roughly 5–65 min depending on project size (see "Cold-start
    expectations & acceleration"). If the Test Runner remains unusable on a project, find
    another way to run its tests.

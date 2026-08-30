@@ -9,20 +9,36 @@ $global:puw_repoRoot   = Split-Path -Parent $PSScriptRoot
 $global:puw_scriptPath = Join-Path $global:puw_repoRoot 'scripts\prepare-unity-worktree.ps1'
 
 # ---------------------------------------------------------------------------
-# Extract the managed block text from the script source.
-# The block is a single-quoted here-string: starts on the line after a line
-# ending in @' and ends on the line that is exactly '@ (no indent).
+# Extract EVERY single-quoted here-string from the script source, keyed by the
+# variable name it is assigned to (e.g. `$managedBlock = @'` ... `'@` yields
+# key 'managedBlock'). NAMED extractor (ticket #47 plan-critic fix) - the
+# previous version concatenated every here-string it found into one blanket
+# $puw_managedBlock, which would silently merge a second here-string
+# ($launchScript) into the same variable and corrupt every assertion scoped to
+# "the managed block" specifically. Each here-string now lands in its own
+# $puw_<name> global variable.
 # ---------------------------------------------------------------------------
 $_rawLines = [System.IO.File]::ReadAllLines($global:puw_scriptPath)
-$_inBlock  = $false
-$_blockLines = [System.Collections.Generic.List[string]]::new()
+$_currentName = $null
+$_blockLines  = [System.Collections.Generic.List[string]]::new()
+$_hereStrings = @{}
 foreach ($_line in $_rawLines) {
     $_t = $_line.TrimEnd()
-    if ($_t -match "@'$")         { $_inBlock = $true;  continue }
-    if ($_t -eq "'@")             { $_inBlock = $false; continue }
-    if ($_inBlock) { $_blockLines.Add($_t) }
+    if ($null -eq $_currentName -and $_t -match '^\s*\$(\w+)\s*=\s*@''$') {
+        $_currentName = $Matches[1]
+        $_blockLines  = [System.Collections.Generic.List[string]]::new()
+        continue
+    }
+    if ($null -ne $_currentName -and $_t -eq "'@") {
+        $_hereStrings[$_currentName] = ($_blockLines -join "`n")
+        $_currentName = $null
+        continue
+    }
+    if ($null -ne $_currentName) { $_blockLines.Add($_t) }
 }
-$global:puw_managedBlock = $_blockLines -join "`n"
+$global:puw_hereStrings  = $_hereStrings
+$global:puw_managedBlock = $_hereStrings['managedBlock']
+$global:puw_launchScript = $_hereStrings['launchScript']
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,6 +54,67 @@ function Remove-TempUnityRepo { param($p) Remove-Item -Recurse -Force -Path $p -
 function Write-Utf8NoBom {
     param([string]$Path, [string]$Content)
     [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# ---------------------------------------------------------------------------
+# Test-critic round 1 fix (R3/R4): materialize $puw_launchScript's source into
+# a standalone temp .ps1 so it can be dot-sourced (". $path", not "& $path")
+# and its real functions called/mocked directly, instead of replicating the
+# decision logic inline where it can never fail regardless of the real
+# script's behaviour. Mirrors New-MaterializedLaunchScript in
+# tests\unity-mcp-adopt.Tests.ps1 (duplicated on purpose - no cross-file
+# load-order dependency).
+# ---------------------------------------------------------------------------
+function New-MaterializedLaunchScriptForPuw {
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("puw-launch-" + [System.IO.Path]::GetRandomFileName() + '.ps1')
+    $src = $global:puw_launchScript
+    if ([string]::IsNullOrEmpty($src)) {
+        $src = '# launchScript here-string not found in prepare-unity-worktree.ps1 (ticket #47 not yet implemented)'
+    }
+    Write-Utf8NoBom -Path $tmp -Content $src
+    return $tmp
+}
+
+function New-LocalStatusFile {
+    param(
+        [string]$StatusDir,
+        [int]$Port,
+        [int]$HeartbeatAgeSeconds = 5,
+        [string]$Name = 'unity-mcp-status-local.json'
+    )
+    New-Item -ItemType Directory -Force -Path $StatusDir | Out-Null
+    $heartbeat = (Get-Date).ToUniversalTime().AddSeconds(-$HeartbeatAgeSeconds).ToString('o')
+    # Field names verified against the real mcpforunityserver==9.7.1 wheel
+    # (review round 3): unity_port / last_heartbeat, not port / heartbeat -
+    # see scripts\prepare-unity-worktree.ps1's Get-StatusFileHeartbeatAgeSeconds
+    # header comment for the exact upstream source lines.
+    $obj  = [pscustomobject]@{ unity_port = $Port; last_heartbeat = $heartbeat }
+    $path = Join-Path $StatusDir $Name
+    ($obj | ConvertTo-Json) | Set-Content -Path $path -Encoding UTF8
+    return $path
+}
+function Start-LocalFakeListener {
+    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    return @{ Listener = $listener; Port = $listener.LocalEndpoint.Port }
+}
+function Stop-LocalFakeListener { param($h) if ($h -and $h.Listener) { try { $h.Listener.Stop() } catch { } } }
+
+# Probe once whether this environment can create filesystem symlinks (mirrors
+# the probe in tests\unity-mcp-adopt.Tests.ps1 - see that file's .NOTES).
+$global:puw_symlinkCapable = $false
+try {
+    $probeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("puw-probe-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $probeDir | Out-Null
+    $probeTarget = Join-Path $probeDir 't.txt'
+    Set-Content -Path $probeTarget -Value 'x'
+    $probeLink = Join-Path $probeDir 'l.txt'
+    New-Item -ItemType SymbolicLink -Path $probeLink -Target $probeTarget -ErrorAction Stop | Out-Null
+    $global:puw_symlinkCapable = $true
+} catch {
+    $global:puw_symlinkCapable = $false
+} finally {
+    Remove-Item -Recurse -Force $probeDir -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------
@@ -59,18 +136,24 @@ Describe 'prepare-unity-worktree.ps1 — managed block content' {
         $global:puw_managedBlock | Should Match 'stop:'
     }
 
-    It 'managed block sets UNITY_MCP_STATUS_DIR to the worktree-local .unity-mcp dir' {
-        $global:puw_managedBlock | Should Match 'UNITY_MCP_STATUS_DIR'
-        $global:puw_managedBlock | Should Match '\.unity-mcp'
+    # Ticket #47 retarget: this content moved out of the managed block into
+    # the shared launch script ($puw_launchScript / .seretos/unity-mcp-launch.ps1)
+    # per the plan's "Affected files" section (editor resolution, batchmode/
+    # nographics, cache server, Library mirror, unity.pid move to the launch
+    # script). Same assertion, same behavioural claim, just pointed at the
+    # here-string that now actually carries this content.
+    It 'launch script sets UNITY_MCP_STATUS_DIR to the checkout-local .unity-mcp dir' {
+        $global:puw_launchScript | Should Match 'UNITY_MCP_STATUS_DIR'
+        $global:puw_launchScript | Should Match '\.unity-mcp'
     }
 
-    It 'managed block sets UNITY_MCP_ALLOW_BATCH' {
-        $global:puw_managedBlock | Should Match 'UNITY_MCP_ALLOW_BATCH'
+    It 'launch script sets UNITY_MCP_ALLOW_BATCH' {
+        $global:puw_launchScript | Should Match 'UNITY_MCP_ALLOW_BATCH'
     }
 
-    It 'managed block contains -batchmode and -nographics args' {
-        $global:puw_managedBlock | Should Match 'batchmode'
-        $global:puw_managedBlock | Should Match 'nographics'
+    It 'launch script contains -batchmode and -nographics args' {
+        $global:puw_launchScript | Should Match 'batchmode'
+        $global:puw_launchScript | Should Match 'nographics'
     }
 
     It 'managed block contains name: default step' {
@@ -81,10 +164,14 @@ Describe 'prepare-unity-worktree.ps1 — managed block content' {
         $global:puw_managedBlock | Should Match 'name: gui'
     }
 
-    It 'managed block default step contains -batchmode' {
-        # Extract text from name: default up to (but not including) name: gui
-        $defaultSection = ($global:puw_managedBlock -split 'name: gui')[0]
-        $defaultSection | Should Match 'batchmode'
+    # Ticket #47 retarget: the default/gui distinction is no longer two
+    # duplicated here-string sections (that duplication is gone per the
+    # plan's "Removed" list) - it is a single shared Start-UnityEditor
+    # function with one `$Variant -eq 'default'` branch. Same behavioural
+    # claim (batchmode is applied for the default variant), retargeted to
+    # how the launch script actually expresses it.
+    It 'launch script applies -batchmode/-nographics only in the $Variant -eq ''default'' branch' {
+        $global:puw_launchScript | Should Match '\$Variant -eq ''default''\)\s*\{\s*\$unityArgs = @\(''-batchmode'', ''-nographics''\)'
     }
 
     It 'managed block gui step does not contain -batchmode' {
@@ -94,18 +181,20 @@ Describe 'prepare-unity-worktree.ps1 — managed block content' {
         $guiSection | Should Not Match 'batchmode'
     }
 
-    It 'managed block gui step contains GUI-mode dialog caveat comment' {
-        $afterGui   = ($global:puw_managedBlock -split 'name: gui')[1]
-        $guiSection = ($afterGui -split 'stop:')[0]
-        $guiSection | Should Match 'does not suppress'
+    # Ticket #47 retarget: the GUI-mode caveat comment lives once in the
+    # shared launch script now (no longer duplicated per-variant), directly
+    # beside the $Variant -eq 'default' batchmode branch above.
+    It 'launch script contains the GUI-mode dialog caveat comment' {
+        $global:puw_launchScript | Should Match 'does not suppress'
     }
 
     It 'managed block does not contain UNITY_WORKTREE_GUI' {
         $global:puw_managedBlock | Should Not Match 'UNITY_WORKTREE_GUI'
     }
 
-    It 'managed block boots the bridge via -executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi' {
-        $global:puw_managedBlock | Should Match 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
+    # Ticket #47 retarget: the boot moved into the shared launch script.
+    It 'launch script boots the bridge via -executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi' {
+        $global:puw_launchScript | Should Match 'MCPForUnity.Editor.McpCiBoot.StartStdioForCi'
     }
 
     It 'managed block records the unity PID in unity.pid' {
@@ -671,18 +760,20 @@ Describe 'prepare-unity-worktree.ps1 — no content inspection (ticket #39)' {
 }
 
 # ---------------------------------------------------------------------------
-Describe 'managed block content — cache server' {
+Describe 'launch script content — cache server' {
+    # Ticket #47 retarget: cache-server flags moved from the managed block
+    # into the shared launch script (Start-UnityEditor). Same assertions.
 
-    It 'managed block contains UNITY_WORKTREE_CACHE_SERVER reference' {
-        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
+    It 'launch script contains UNITY_WORKTREE_CACHE_SERVER reference' {
+        $global:puw_launchScript | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
     }
 
-    It 'managed block contains -EnableCacheServer flag' {
-        $global:puw_managedBlock | Should Match 'EnableCacheServer'
+    It 'launch script contains -EnableCacheServer flag' {
+        $global:puw_launchScript | Should Match 'EnableCacheServer'
     }
 
-    It 'managed block contains -cacheServerEndpoint flag' {
-        $global:puw_managedBlock | Should Match 'cacheServerEndpoint'
+    It 'launch script contains -cacheServerEndpoint flag' {
+        $global:puw_launchScript | Should Match 'cacheServerEndpoint'
     }
 }
 
@@ -763,46 +854,45 @@ Describe 'UNITY_WORKTREE_CACHE_SERVER runtime arg-filter' {
         ($args -contains '-EnableCacheServer') | Should Be $true
     }
 
-    It 'structural coupling: managed block contains UNITY_WORKTREE_CACHE_SERVER' {
-        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
+    # Ticket #47 retarget: this coupling assertion now points at the launch
+    # script, which is the here-string that actually carries this content.
+    It 'structural coupling: launch script contains UNITY_WORKTREE_CACHE_SERVER' {
+        $global:puw_launchScript | Should Match 'UNITY_WORKTREE_CACHE_SERVER'
     }
 }
 
 # ---------------------------------------------------------------------------
-Describe 'managed block content — Library mirror' {
+Describe 'launch script content — Library mirror' {
+    # Ticket #47 retarget: the Library-mirror logic moved from the managed
+    # block into the shared launch script's Start-UnityEditor function.
 
-    It 'managed block contains UNITY_WORKTREE_MIRROR_LIBRARY reference' {
-        $global:puw_managedBlock | Should Match 'UNITY_WORKTREE_MIRROR_LIBRARY'
+    It 'launch script contains UNITY_WORKTREE_MIRROR_LIBRARY reference' {
+        $global:puw_launchScript | Should Match 'UNITY_WORKTREE_MIRROR_LIBRARY'
     }
 
-    It 'managed block contains UnityLockfile guard' {
-        $global:puw_managedBlock | Should Match 'UnityLockfile'
+    It 'launch script contains UnityLockfile guard' {
+        $global:puw_launchScript | Should Match 'UnityLockfile'
     }
 
-    It 'managed block contains robocopy call' {
-        $global:puw_managedBlock | Should Match 'robocopy'
+    It 'launch script contains robocopy call' {
+        $global:puw_launchScript | Should Match 'robocopy'
     }
 
-    It 'managed block contains rsync call' {
-        $global:puw_managedBlock | Should Match 'rsync'
+    It 'launch script contains rsync call' {
+        $global:puw_launchScript | Should Match 'rsync'
     }
 
-    It 'mirror step appears before Start-Process in the default section' {
-        # Split on 'name: gui' to isolate the default section
-        $defaultSection = ($global:puw_managedBlock -split 'name: gui')[0]
-        $mirrorIdx      = $defaultSection.IndexOf('UNITY_WORKTREE_MIRROR_LIBRARY')
-        $startIdx       = $defaultSection.IndexOf('Start-Process')
-        $mirrorIdx | Should Not Be -1
-        $startIdx  | Should Not Be -1
-        ($mirrorIdx -lt $startIdx) | Should Be $true
-    }
-
-    It 'mirror step appears before Start-Process in the gui section' {
-        # Split to isolate the gui section (after 'name: gui', before 'stop:')
-        $afterGui   = ($global:puw_managedBlock -split 'name: gui')[1]
-        $guiSection = ($afterGui -split 'stop:')[0]
-        $mirrorIdx  = $guiSection.IndexOf('UNITY_WORKTREE_MIRROR_LIBRARY')
-        $startIdx   = $guiSection.IndexOf('Start-Process')
+    # Ticket #47: the old "default section" / "gui section" pair tested two
+    # duplicated copies of the same body - that duplication is gone (plan's
+    # "Removed" list: "the per-variant duplication assertions go with them").
+    # Start-UnityEditor is now a single shared function whose mirror-then-
+    # launch ordering does not depend on $Variant at all, so this collapses
+    # to one assertion against the shared script, per the plan's explicit
+    # guidance for the cache-server arg-filter duplication.
+    It 'mirror step appears before Start-Process in the shared launch script' {
+        $text      = [string]$global:puw_launchScript
+        $mirrorIdx = $text.IndexOf('UNITY_WORKTREE_MIRROR_LIBRARY')
+        $startIdx  = $text.IndexOf('Start-Process')
         $mirrorIdx | Should Not Be -1
         $startIdx  | Should Not Be -1
         ($mirrorIdx -lt $startIdx) | Should Be $true
@@ -813,27 +903,23 @@ Describe 'managed block content — Library mirror' {
 # Finding 1 regression: lockfile path must use a forward-slash separator
 # (Join-Path child segment) so the guard works on POSIX PowerShell 7.
 # ---------------------------------------------------------------------------
-Describe 'managed block content — Library mirror lockfile path (Finding-1 regression)' {
+Describe 'launch script content — Library mirror lockfile path (Finding-1 regression)' {
+    # Ticket #47 retarget: the lockfile guard moved into the shared launch
+    # script. The old "default section" / "gui section" pair tested two
+    # duplicated copies of the same guard; that duplication is gone (single
+    # shared Start-UnityEditor function), so those two collapse into the one
+    # general assertion below - re-asserting them separately would just
+    # duplicate this same fact, which the plan's "Removed" list explicitly
+    # retires ("the per-variant duplication assertions go with them").
 
     It 'Finding-1: lockfile path uses forward-slash separator (Temp/UnityLockfile)' {
         # Catches any backslash regression in the Join-Path child segment.
-        $global:puw_managedBlock | Should Match "Temp/UnityLockfile"
+        $global:puw_launchScript | Should Match "Temp/UnityLockfile"
     }
 
     It 'Finding-1: lockfile path does NOT use backslash separator (Temp\UnityLockfile)' {
-        # The literal string with a backslash must be absent from the block.
-        ($global:puw_managedBlock -match 'Temp\\UnityLockfile') | Should Be $false
-    }
-
-    It 'Finding-1: default section lockfile uses forward slash' {
-        $defaultSection = ($global:puw_managedBlock -split 'name: gui')[0]
-        ($defaultSection -match "Temp/UnityLockfile") | Should Be $true
-    }
-
-    It 'Finding-1: gui section lockfile uses forward slash' {
-        $afterGui   = ($global:puw_managedBlock -split 'name: gui')[1]
-        $guiSection = ($afterGui -split 'stop:')[0]
-        ($guiSection -match "Temp/UnityLockfile") | Should Be $true
+        # The literal string with a backslash must be absent from the script.
+        ($global:puw_launchScript -match 'Temp\\UnityLockfile') | Should Be $false
     }
 }
 
@@ -842,29 +928,24 @@ Describe 'managed block content — Library mirror lockfile path (Finding-1 regr
 # gracefully (no throw).  Static check: managed block must contain the
 # IsNullOrEmpty guard; behavioural check via an inline script block.
 # ---------------------------------------------------------------------------
-Describe 'managed block content — Library mirror empty-mainRoot guard (Finding-2 regression)' {
+Describe 'launch script content — Library mirror empty-mainRoot guard (Finding-2 regression)' {
+    # Ticket #47 retarget: this guard moved into the shared launch script.
+    # The old "default section" / "gui section" pair duplicated the same
+    # fact about two copies of the body that no longer exist as separate
+    # copies (single shared Start-UnityEditor function) - collapsed away,
+    # matching the plan's "Removed" list for per-variant duplication
+    # assertions; the general assertion below already covers it.
 
-    It 'Finding-2: managed block contains IsNullOrEmpty guard for mainRoot' {
-        $global:puw_managedBlock | Should Match 'IsNullOrEmpty'
+    It 'Finding-2: launch script contains IsNullOrEmpty guard for mainRoot' {
+        $global:puw_launchScript | Should Match 'IsNullOrEmpty'
     }
 
-    It 'Finding-2: managed block contains the graceful skip message for main-checkout scenario' {
-        $global:puw_managedBlock | Should Match 'running from main checkout'
+    It 'Finding-2: launch script contains the graceful skip message for main-checkout scenario' {
+        $global:puw_launchScript | Should Match 'running from main checkout'
     }
 
-    It 'Finding-2: managed block contains Convert-Path call for absolute resolution of gitCommonDir' {
-        $global:puw_managedBlock | Should Match 'Convert-Path'
-    }
-
-    It 'Finding-2: default section contains IsNullOrEmpty guard' {
-        $defaultSection = ($global:puw_managedBlock -split 'name: gui')[0]
-        ($defaultSection -match 'IsNullOrEmpty') | Should Be $true
-    }
-
-    It 'Finding-2: gui section contains IsNullOrEmpty guard' {
-        $afterGui   = ($global:puw_managedBlock -split 'name: gui')[1]
-        $guiSection = ($afterGui -split 'stop:')[0]
-        ($guiSection -match 'IsNullOrEmpty') | Should Be $true
+    It 'Finding-2: launch script contains Convert-Path call for absolute resolution of gitCommonDir' {
+        $global:puw_launchScript | Should Match 'Convert-Path'
     }
 
     # Behavioural test: simulate the main-checkout scenario where git rev-parse
@@ -895,5 +976,452 @@ Describe 'managed block content — Library mirror empty-mainRoot guard (Finding
         }
         $threw   | Should Be $false
         $skipped | Should Be $true
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / R3 — the launcher's three branches (live / dangling /
+# stale-but-present), reached from a single shared preamble that both
+# -AdoptOnly and a full launch invoke. The preamble + $launchScript do not
+# exist yet, so the structural assertions below are the driving RED; the
+# behavioural replica documents the intended decision table (established
+# "replicate the logic inline" style already used by the cache-server arg
+# filter above) and is not itself the RED-proving assertion.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #47 / R3)' {
+
+    It 'structural: the adoption preamble (Invoke-UnityMcpAdoption) appears exactly once in $puw_launchScript' {
+        $text = [string]$global:puw_launchScript
+        ([regex]::Matches($text, 'function Invoke-UnityMcpAdoption')).Count | Should Be 1
+    }
+
+    It 'structural: the managed block''s default step invokes .seretos/unity-mcp-launch.ps1 with -Variant default' {
+        $defaultSection = ($global:puw_managedBlock -split 'name: gui')[0]
+        $defaultSection | Should Match 'unity-mcp-launch\.ps1'
+        $defaultSection | Should Match '-Variant\s+default'
+    }
+
+    It 'structural: the managed block''s gui step invokes .seretos/unity-mcp-launch.ps1 with -Variant gui' {
+        $afterGui   = ($global:puw_managedBlock -split 'name: gui')[1]
+        $guiSection = ($afterGui -split 'stop:')[0]
+        $guiSection | Should Match 'unity-mcp-launch\.ps1'
+        $guiSection | Should Match '-Variant\s+gui'
+    }
+
+    It 'structural: $puw_launchScript distinguishes "already running" (real file) from "adopted" (symlinked) wording (plan-critic fix)' {
+        $text = [string]$global:puw_launchScript
+        $text | Should Match 'already running'
+        $text | Should Match '(?i)adopted'
+    }
+
+    # test-critic fix: "Get-LaunchDecisionReplica" above was defined and
+    # asserted against itself inside its own It block, so it could never fail
+    # regardless of what the real script does. Replaced with tests that
+    # dot-source $puw_launchScript's materialized content and call the REAL
+    # decision function (Get-UnityMcpLaunchDecision) and the REAL flow
+    # function (Invoke-UnityMcpLauncherFlow), mocking the function that would
+    # actually start Unity (Start-UnityEditor) and asserting it was NOT
+    # called in the live branch and WAS called in the non-live branches -
+    # these names are this developer's assumed contract for the
+    # phase=implement script (see tests\unity-mcp-adopt.Tests.ps1's header
+    # .NOTES for the sibling Find-AdoptionCandidate/Invoke-UnityMcpAdoption
+    # contract this shares a status-dir format with).
+    #
+    # "Dangling" specifically (a link whose target vanished) is exercised at
+    # the Remove-StaleAdoptionLinks level in tests\unity-mcp-adopt.Tests.ps1's
+    # R2 Describe (gated by symlink capability, unavailable in this sandbox -
+    # see that file's .NOTES). Get-UnityMcpLaunchDecision itself only needs to
+    # answer "is there a live status file in StatusDir right now" - by the
+    # time it runs, the preamble has already deleted dangling links, so
+    # "dangling" and "nothing present" are the same input to this function.
+    # The symlink-capable-gated test below still exercises the real dangling
+    # case end-to-end (cleanup + decision) when privilege allows it.
+    It 'live: a fresh status file yields already-connected and Start-UnityEditor is not called' {
+        $checkout = New-TempUnityRepo
+        $fake = $null
+        try {
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            $fake = Start-LocalFakeListener
+            New-LocalStatusFile -StatusDir $statusDir -Port $fake.Port -HeartbeatAgeSeconds 5 | Out-Null
+
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $decision = $null
+            $threw = $false
+            try {
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+            } catch { $threw = $true }
+
+            # Expected RED: Get-UnityMcpLaunchDecision is not defined yet (no
+            # $launchScript here-string) -> CommandNotFoundException.
+            $threw | Should Be $false
+            $decision | Should Be 'already-connected'
+
+            Mock Start-UnityEditor { }
+            Invoke-UnityMcpLauncherFlow -CheckoutPath $checkout -GlobalStatusDir (Join-Path ([System.IO.Path]::GetTempPath()) ('puw-empty-global-' + [guid]::NewGuid()))
+            Assert-MockCalled Start-UnityEditor -Times 0 -Exactly
+        } finally {
+            if ($fake) { Stop-LocalFakeListener $fake }
+            Remove-TempUnityRepo $checkout
+        }
+    }
+
+    It 'symlink-capable only: a genuinely dangling link is removed by the preamble and the decision is still launch' {
+        if (-not $global:puw_symlinkCapable) {
+            Write-Warning 'symlink creation unsupported in this sandbox (no Developer Mode / admin) - skipping this real-fixture test; coverage carried by the three tests above plus tests\unity-mcp-adopt.Tests.ps1''s R2 Describe.'
+            return
+        }
+        $checkout = New-TempUnityRepo
+        try {
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            New-Item -ItemType Directory -Force -Path $statusDir | Out-Null
+            $targetDir = New-TempUnityRepo
+            $target = Join-Path $targetDir 'unity-mcp-status-9999.json'
+            Set-Content -Path $target -Value '{}' -Encoding UTF8
+            $linkPath = Join-Path $statusDir 'unity-mcp-status-9999.json'
+            New-Item -ItemType SymbolicLink -Path $linkPath -Target $target -ErrorAction Stop | Out-Null
+            Remove-Item -Path $target -Force
+            Remove-TempUnityRepo $targetDir
+
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $threw = $false
+            try {
+                Remove-StaleAdoptionLinks -StatusDir $statusDir
+            } catch { $threw = $true }
+            $threw | Should Be $false
+            @(Get-ChildItem -Path $statusDir -Force | Select-Object -ExpandProperty Name) | Should Not Contain 'unity-mcp-status-9999.json'
+
+            $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+            $decision | Should Be 'launch'
+        } finally { Remove-TempUnityRepo $checkout }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / R3 continued — "nothing present" and "stale-but-present" live
+# in their OWN Describe blocks, each the sole user of `Mock Start-UnityEditor`
+# in its scope. Reproduced independently: Pester 3.4.0's `Mock <Name>` fails
+# to intercept when a sibling `It` earlier in the SAME Describe already
+# mocked the same function name and a later `It` re-dot-sources a freshly
+# materialized copy of the script before re-mocking it - the mock silently
+# does not attach and the real Start-UnityEditor (which calls Start-Process
+# against a nonexistent editor path) runs instead. Splitting each mock target
+# into its own Describe (fresh dot-source + a single, first-and-only `Mock`
+# call of that name in that scope) is a Pester-3.4-safe pattern verified
+# empirically against this suite. The behavioural assertions are unchanged -
+# only the test-file scaffolding around them moved.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #47 / R3) - nothing present' {
+
+    It 'nothing present (dangling-equivalent once cleaned up): decision is launch and Start-UnityEditor is called' {
+        $checkout = New-TempUnityRepo
+        try {
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            New-Item -ItemType Directory -Force -Path $statusDir | Out-Null
+
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $decision = $null
+            $threw = $false
+            try {
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+            } catch { $threw = $true }
+            $threw | Should Be $false
+            $decision | Should Be 'launch'
+
+            Mock Start-UnityEditor { }
+            Invoke-UnityMcpLauncherFlow -CheckoutPath $checkout -GlobalStatusDir (Join-Path ([System.IO.Path]::GetTempPath()) ('puw-empty-global-' + [guid]::NewGuid()))
+            Assert-MockCalled Start-UnityEditor -Times 1 -Exactly
+        } finally { Remove-TempUnityRepo $checkout }
+    }
+}
+
+Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #47 / R3) - stale-but-present' {
+
+    It 'stale-but-present: a real (non-link) status file with an expired heartbeat yields launch and starts Unity' {
+        $checkout = New-TempUnityRepo
+        $fake = $null
+        try {
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            $fake = Start-LocalFakeListener
+            New-LocalStatusFile -StatusDir $statusDir -Port $fake.Port -HeartbeatAgeSeconds 61 | Out-Null
+            Stop-LocalFakeListener $fake
+            $fake = $null
+
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $decision = $null
+            $threw = $false
+            try {
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+            } catch { $threw = $true }
+            $threw | Should Be $false
+            $decision | Should Be 'launch'
+
+            Mock Start-UnityEditor { }
+            Invoke-UnityMcpLauncherFlow -CheckoutPath $checkout -GlobalStatusDir (Join-Path ([System.IO.Path]::GetTempPath()) ('puw-empty-global-' + [guid]::NewGuid()))
+            Assert-MockCalled Start-UnityEditor -Times 1 -Exactly
+
+            # The real (non-link) file must survive - only symlink entries are
+            # ever deleted by the preamble's cleanup pass.
+            Test-Path (Join-Path $statusDir 'unity-mcp-status-local.json') | Should Be $true
+        } finally {
+            if ($fake) { Stop-LocalFakeListener $fake }
+            Remove-TempUnityRepo $checkout
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / review round 2 blocking fix - a malformed (non-numeric) port
+# field in one status file must not abort Get-UnityMcpLaunchDecision's scan
+# for every other, valid status file in the same directory. The generated
+# launch script runs under $ErrorActionPreference = 'Stop', so an unguarded
+# [int]$data.port cast inside Test-StatusFileLive throws a terminating
+# exception that (pre-fix) propagates out of the scanning foreach loop.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #47 / review round 2 blocking fix) - malformed port' {
+
+    It 'a malformed non-numeric port field in one status file does not abort the scan for a genuinely live entry' {
+        $checkout = New-TempUnityRepo
+        $fake = $null
+        try {
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            New-Item -ItemType Directory -Force -Path $statusDir | Out-Null
+
+            # A malformed real status file (e.g. partially written/corrupted)
+            # sitting alongside a genuinely live one in the same status dir.
+            $badObj = [pscustomobject]@{ unity_port = 'not-a-number'; last_heartbeat = (Get-Date).ToUniversalTime().AddSeconds(-5).ToString('o') }
+            ($badObj | ConvertTo-Json) | Set-Content -Path (Join-Path $statusDir 'unity-mcp-status-0-bad.json') -Encoding UTF8
+
+            $fake = Start-LocalFakeListener
+            New-LocalStatusFile -StatusDir $statusDir -Port $fake.Port -HeartbeatAgeSeconds 5 -Name 'unity-mcp-status-good.json' | Out-Null
+
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $decision = $null
+            $threw = $false
+            try {
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+            } catch { $threw = $true }
+
+            # Expected RED (pre-fix): the unguarded [int]$data.port cast in
+            # Test-StatusFileLive throws a terminating exception for the
+            # malformed entry, aborting the scan before the genuinely live
+            # entry is ever reached (order-dependent, but the malformed file's
+            # name sorts before the good one in most enumerations).
+            $threw | Should Be $false
+            $decision | Should Be 'already-connected'
+        } finally {
+            if ($fake) { Stop-LocalFakeListener $fake }
+            Remove-TempUnityRepo $checkout
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / R4 — starting in the main checkout never mirrors Library/ onto
+# itself: the existing IsNullOrEmpty/Test-Path guard cannot detect
+# $mainRoot -eq $proj (the resolved path DOES exist - it's the checkout
+# itself), so a same-path guard must be added.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - main checkout never mirrors Library onto itself (ticket #47 / R4)' {
+
+    It 'structural: $puw_launchScript contains a same-path (mainRoot -eq proj) guard' {
+        $text = [string]$global:puw_launchScript
+        $text | Should Match '\$mainRoot\s*-eq\s*\$proj'
+    }
+
+    # test-critic fix: "Test-MirrorSkipReplica" above had the same
+    # self-referential problem as R3's replica - defined and asserted against
+    # itself, so it could never fail regardless of what the real script does.
+    # Replaced with tests that dot-source $puw_launchScript's materialized
+    # content and drive the REAL guard (Test-ShouldSkipLibraryMirror) and the
+    # REAL mirror entry point (Invoke-LibraryMirror), mocking the function
+    # that actually shells out to robocopy/rsync (Invoke-LibraryRobocopy) and
+    # asserting it is NOT called when mainRoot -eq proj, and IS called
+    # (control case, no regression) for a distinct existing mainRoot. These
+    # names are this developer's assumed contract for the phase=implement
+    # script.
+    It 'mainRoot -eq proj: the real guard skips the mirror and robocopy is never invoked' {
+        $projDir = New-TempUnityRepo
+        try {
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $skip = $null
+            $threw = $false
+            try {
+                $skip = Test-ShouldSkipLibraryMirror -MainRoot $projDir -Proj $projDir
+            } catch { $threw = $true }
+
+            # Expected RED: Test-ShouldSkipLibraryMirror is not defined yet (no
+            # $launchScript here-string) -> CommandNotFoundException.
+            $threw | Should Be $false
+            $skip | Should Be $true
+
+            Mock Invoke-LibraryRobocopy { }
+            Invoke-LibraryMirror -MainRoot $projDir -Proj $projDir
+            Assert-MockCalled Invoke-LibraryRobocopy -Times 0 -Exactly
+        } finally { Remove-TempUnityRepo $projDir }
+    }
+
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / R4 continued — the control case lives in its OWN Describe,
+# the sole user of `Mock Invoke-LibraryRobocopy` in its scope. Same reproduced
+# Pester 3.4.0 bug as R3 above: the preceding "mainRoot -eq proj" test in the
+# original single Describe already mocked Invoke-LibraryRobocopy first, so
+# this test's own `Mock` call failed to intercept and the real function (which
+# shells out to robocopy/rsync) ran instead. Behavioural assertion unchanged.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - main checkout never mirrors Library onto itself (ticket #47 / R4) - control case' {
+
+    It 'mainRoot distinct from proj (control, no regression): the guard does not skip and robocopy is invoked' {
+        $projDir  = New-TempUnityRepo
+        $otherDir = New-TempUnityRepo
+        try {
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            $skip = $null
+            $threw = $false
+            try {
+                $skip = Test-ShouldSkipLibraryMirror -MainRoot $otherDir -Proj $projDir
+            } catch { $threw = $true }
+            $threw | Should Be $false
+            $skip | Should Be $false
+
+            Mock Invoke-LibraryRobocopy { }
+            Invoke-LibraryMirror -MainRoot $otherDir -Proj $projDir
+            Assert-MockCalled Invoke-LibraryRobocopy -Times 1 -Exactly
+        } finally { Remove-TempUnityRepo $projDir; Remove-TempUnityRepo $otherDir }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / R5 — .seretos/unity-mcp-launch.ps1 is generated content owned
+# outright by this plugin: always overwritten (even without -Force), while
+# .seretos/worktree-setup.yml keeps its existing existence-based ownership
+# (#37/#39) untouched.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - .seretos/unity-mcp-launch.ps1 is always regenerated; worktree-setup.yml still never touched (ticket #47 / R5)' {
+
+    It 'creates .seretos/unity-mcp-launch.ps1 on a fresh repo, carrying the "do not hand-edit" header' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $launchScriptPath = Join-Path $tmp '.seretos\unity-mcp-launch.ps1'
+            Test-Path $launchScriptPath | Should Be $true
+            (Get-Content -LiteralPath $launchScriptPath -Raw) | Should Match 'do not hand-edit'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'restores generated content over a hand-edited launch script without -Force; worktree-setup.yml stays byte-identical' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $launchScriptPath = Join-Path $tmp '.seretos\unity-mcp-launch.ps1'
+            Test-Path $launchScriptPath | Should Be $true
+
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+            Add-Content -Path $launchScriptPath -Value '# SENTINEL-HAND-EDIT'
+            Add-Content -Path $setupPath -Value '# SENTINEL-HAND-EDIT'
+            $ymlBefore = Get-Content -LiteralPath $setupPath -Raw
+
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+
+            $launchScriptAfter = Get-Content -LiteralPath $launchScriptPath -Raw
+            $launchScriptAfter | Should Not Match 'SENTINEL-HAND-EDIT'
+            $launchScriptAfter | Should Match 'do not hand-edit'
+
+            $ymlAfter = Get-Content -LiteralPath $setupPath -Raw
+            $ymlAfter | Should Be $ymlBefore
+            $ymlAfter | Should Match 'SENTINEL-HAND-EDIT'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It '-Force behaves identically for the launch script (still overwritten) and the yml (still untouched)' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $launchScriptPath = Join-Path $tmp '.seretos\unity-mcp-launch.ps1'
+            $setupPath        = Join-Path $tmp '.seretos\worktree-setup.yml'
+            Add-Content -Path $launchScriptPath -Value '# SENTINEL-HAND-EDIT'
+            Add-Content -Path $setupPath -Value '# SENTINEL-HAND-EDIT'
+            $ymlBefore = Get-Content -LiteralPath $setupPath -Raw
+
+            & $global:puw_scriptPath -RepoRoot $tmp -Force | Out-Null
+
+            (Get-Content -LiteralPath $launchScriptPath -Raw) | Should Not Match 'SENTINEL-HAND-EDIT'
+            (Get-Content -LiteralPath $setupPath -Raw)        | Should Be $ymlBefore
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'a repo with no .seretos/ directory yet still gets the launch script created' {
+        $tmp = New-TempUnityRepo
+        try {
+            Test-Path (Join-Path $tmp '.seretos') | Should Be $false
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            Test-Path (Join-Path $tmp '.seretos\unity-mcp-launch.ps1') | Should Be $true
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'the generated launch script is not added to .gitignore' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $gi = Get-Content -LiteralPath (Join-Path $tmp '.gitignore') -Raw
+            $gi | Should Not Match 'unity-mcp-launch\.ps1'
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #47 / R8 — version-pin strategy is documented and internally
+# coupled: both manifests' mcpforunityserver==X pin and the script's
+# -UnityMcpVersion default must agree (this proves internal agreement only,
+# not agreement with whatever is actually installed in a target project -
+# that stays a documented manual check, per the plan).
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - version-pin strategy is internally coupled (ticket #47 / R8)' {
+
+    It 'both plugin manifests'' mcpforunityserver pin and the -UnityMcpVersion default all agree' {
+        $claudeManifest = Get-Content -LiteralPath (Join-Path $global:puw_repoRoot '.claude-plugin\plugin.json') -Raw | ConvertFrom-Json
+        $codexManifest  = Get-Content -LiteralPath (Join-Path $global:puw_repoRoot '.codex-plugin\plugin.json') -Raw | ConvertFrom-Json
+
+        function Get-PinVersionFromManifest {
+            param($Manifest)
+            foreach ($a in $Manifest.mcpServers.unityMCP.args) {
+                if ($a -match 'mcpforunityserver==(.+)$') { return $Matches[1] }
+            }
+            return $null
+        }
+
+        $claudePin = Get-PinVersionFromManifest $claudeManifest
+        $codexPin  = Get-PinVersionFromManifest $codexManifest
+
+        $src = [System.IO.File]::ReadAllText($global:puw_scriptPath)
+        $scriptDefault = $null
+        if ($src -match "\[string\]\`$UnityMcpVersion\s*=\s*'([^']+)'") { $scriptDefault = $Matches[1] }
+
+        $claudePin     | Should Not BeNullOrEmpty
+        $codexPin      | Should Not BeNullOrEmpty
+        $scriptDefault | Should Not BeNullOrEmpty
+        $claudePin | Should Be $codexPin
+        $claudePin | Should Be $scriptDefault
+    }
+
+    It 'SKILL.md documents the version-pin strategy under a concrete heading' {
+        $skillPath = Join-Path $global:puw_repoRoot 'skills\unity-wrapper\SKILL.md'
+        $skillText = [System.IO.File]::ReadAllText($skillPath)
+        $skillText | Should Match '### Version-pin strategy'
     }
 }

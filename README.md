@@ -15,5 +15,5 @@ This plugin ships **only skill content** — no binaries of its own. It wraps a 
 
 ## What the skills teach
 
-- **`unity-wrapper`** — drives the Unity editor through the Unity MCP server: scenes, GameObjects, components, assets, Play mode, Test Runner, screenshots, and per-worktree Unity boot. See `skills/unity-wrapper/SKILL.md`.
+- **`unity-wrapper`** — drives the Unity editor through the Unity MCP server: scenes, GameObjects, components, assets, Play mode, Test Runner, screenshots, and booting Unity per `agent-worktree` Environment (a linked worktree, or the main checkout via `checkout_path=`) with automatic Unity Hub adoption. See `skills/unity-wrapper/SKILL.md`.
 - **`unity-yaml-merge`** — git-merging Unity's YAML-serialized assets through the `UnityYAMLMerge` (SmartMerge) driver: detecting conflicts that leave no markers, wiring the merge driver, unattended-safe flags, and mechanically resolving a conflict. See `skills/unity-yaml-merge/SKILL.md`.

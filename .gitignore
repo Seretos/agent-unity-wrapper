@@ -6,3 +6,4 @@ Thumbs.db
 .process-ticket-result.json
 __pycache__/
 *.pyc
+.adev/

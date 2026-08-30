@@ -74,6 +74,7 @@ jobs:
           cp .codex-plugin/plugin.json  "$STAGE/.codex-plugin/"
           cp -a skills/. "$STAGE/skills/"
           cp -a scripts "$STAGE/"
+          cp -a hooks "$STAGE/"
           cp README.md "$STAGE/"
           cp LICENSE "$STAGE/" 2>/dev/null || true
           # assets/ goes onto the orphan release branch so the dispatch

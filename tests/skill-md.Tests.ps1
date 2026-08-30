@@ -43,9 +43,9 @@ Describe 'SKILL.md -- recovery from a failed Unity call (ticket #31)' {
         $global:skillmd_text.Contains($global:skillmd_errorString) | Should Be $true
     }
 
-    It 'Pitfall 1 mentions worktree_start as the recovery step' {
+    It 'Pitfall 1 mentions environment_start as the recovery step (ticket #47)' {
         $pitfall1 = Get-PitfallRegion -Text $global:skillmd_text -Number 1 -NextNumber 2
-        $pitfall1 | Should Match 'worktree_start'
+        $pitfall1 | Should Match 'environment_start'
     }
 
     It 'Pitfall 1 mentions retrying the same call' {
@@ -107,8 +107,9 @@ Describe 'SKILL.md -- Pitfall 5 is the non-retryable variant (ticket #31)' {
         $pitfall5 | Should Not Match 'fail silently'
     }
 
-    It 'still closes with the "Always start via worktree_start" instruction' {
-        $pitfall5 | Should Match '(?s)Always start\s+via'
+    It 'documents starting the main checkout via environment_start with checkout_path (ticket #47)' {
+        $global:skillmd_text | Should Match 'environment_start'
+        $global:skillmd_text | Should Match 'checkout_path'
     }
 }
 
@@ -185,8 +186,8 @@ Describe 'SKILL.md -- frontmatter description covers the whole skill (ticket #33
         $description | Should Match 'screenshot'
     }
 
-    It 'the description mentions worktree_start' {
-        $description | Should Match 'worktree_start'
+    It 'the description mentions environment_start (ticket #47)' {
+        $description | Should Match 'environment_start'
     }
 
     It 'the description mentions headless and GUI variants' {
@@ -361,5 +362,88 @@ Describe 'SKILL.md -- cross-references unity-yaml-merge; frontmatter stays clean
 
     It 'frontmatter description stays free of merge-driver phrasing (disjoint trigger surfaces)' {
         $description | Should Not Match '(?i)unityyamlmerge|merge driver|gitattributes'
+    }
+}
+
+# --- ticket #47: migrate to the agent-worktree Environment model + adoption -
+
+Describe 'SKILL.md/README/AGENTS/hooks/script -- no worktree_start/worktree_stop reference remains (ticket #47 / R6)' {
+
+    It 'SKILL.md contains no worktree_start reference' {
+        $global:skillmd_text | Should Not Match 'worktree_start'
+    }
+
+    It 'SKILL.md contains no worktree_stop reference' {
+        $global:skillmd_text | Should Not Match 'worktree_stop'
+    }
+
+    It 'README.md contains no worktree_start/worktree_stop reference' {
+        $readme = [System.IO.File]::ReadAllText((Join-Path $global:skillmd_repoRoot 'README.md'))
+        $readme | Should Not Match 'worktree_start'
+        $readme | Should Not Match 'worktree_stop'
+    }
+
+    It 'AGENTS.md contains no worktree_start/worktree_stop reference' {
+        $agents = [System.IO.File]::ReadAllText((Join-Path $global:skillmd_repoRoot 'AGENTS.md'))
+        $agents | Should Not Match 'worktree_start'
+        $agents | Should Not Match 'worktree_stop'
+    }
+
+    It 'scripts/prepare-unity-worktree.ps1 contains no worktree_start/worktree_stop reference' {
+        $script = [System.IO.File]::ReadAllText((Join-Path $global:skillmd_repoRoot 'scripts\prepare-unity-worktree.ps1'))
+        $script | Should Not Match 'worktree_start'
+        $script | Should Not Match 'worktree_stop'
+    }
+
+    It 'hooks/ (once it exists) contains no worktree_start/worktree_stop reference' {
+        $hooksDir = Join-Path $global:skillmd_repoRoot 'hooks'
+        Test-Path $hooksDir | Should Be $true
+        Get-ChildItem -Path $hooksDir -Recurse -File | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName)
+            $content | Should Not Match 'worktree_start'
+            $content | Should Not Match 'worktree_stop'
+        }
+    }
+}
+
+Describe 'SKILL.md -- three use cases documented: worktree, main checkout, adoption (ticket #47 / R7)' {
+
+    It 'documents starting a linked worktree via environment_start' {
+        $global:skillmd_text | Should Match 'environment_start'
+    }
+
+    It 'documents starting the main checkout via checkout_path=' {
+        $global:skillmd_text | Should Match 'checkout_path'
+    }
+
+    It 'documents environment_stop replacing worktree_stop' {
+        $global:skillmd_text | Should Match 'environment_stop'
+    }
+}
+
+Describe 'SKILL.md -- Unity Hub adoption + host scope (ticket #47 / R7)' {
+
+    It 'documents the "Unity Hub adoption" heading' {
+        $global:skillmd_text | Should Match '### Unity Hub adoption'
+    }
+
+    $adoptionSection = Get-Section -Text $global:skillmd_text -Heading '### Unity Hub adoption'
+
+    It 'the adoption section mentions the SessionStart hook (the automatic Claude Code path)' {
+        $adoptionSection | Should Match '(?i)SessionStart'
+    }
+
+    It 'the adoption section states adoption is automatic on Claude Code only - Codex has no hook surface' {
+        $adoptionSection | Should Match '(?i)Claude Code'
+        $adoptionSection | Should Match '(?i)Codex'
+        $adoptionSection | Should Match '(?i)no hook surface'
+    }
+
+    It 'no longer instructs "Always start via worktree_start" after a direct start (adoption replaces the relaunch pitfall)' {
+        $global:skillmd_text | Should Not Match '(?s)Always start\s+via\s*`?worktree_start'
+    }
+
+    It 'the "Status-dir isolation contract" heading is preserved (guards a dangling cross-reference)' {
+        $global:skillmd_text | Should Match '### Status-dir isolation contract'
     }
 }

@@ -29,8 +29,10 @@ jobs:
         shell: bash
         run: |
           V="${{ inputs.version }}"
-          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])."
+          NUMID='(0|[1-9][0-9]*)'
+          PREID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          if [[ ! "$V" =~ ^${NUMID}\.${NUMID}\.${NUMID}(-${PREID}(\.${PREID})*)?$ ]]; then
+            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE], no build metadata, no leading zeros)."
             exit 1
           fi
 
@@ -50,6 +52,22 @@ jobs:
             echo "::error::Tag ${TAG} already exists. Delete it first or pick a new version."
             exit 1
           fi
+
+      # Resolves the previous release tag (for release-notes diffing below)
+      # and validates the src/<TAG> marker contract before anything is
+      # staged/pushed. Pure local decision logic - no gh/network calls - so
+      # it belongs before any mutating step. fetch-depth: 0 on the checkout
+      # above already gives `git tag --list` the full tag history it needs.
+      - name: Pre-flight - resolve previous release tag and validate src/<TAG> markers
+        id: preflight
+        shell: bash
+        run: |
+          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
+          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          PREV_TAG=$(git tag --list | .github/scripts/prev-release-tag.sh "$PLUGIN_NAME" "${{ inputs.version }}")
+          git tag --list | .github/scripts/preflight-check.sh "$TAG" "$PREV_TAG"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Stamp version into plugin manifests (in CI only)
         shell: bash
@@ -99,9 +117,13 @@ jobs:
       - name: Push orphan release branch and capture commit
         id: rel
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           STAGE="${{ steps.stage.outputs.stage }}"
           ZIP="${{ steps.stage.outputs.zip }}"
+          TAG="${{ steps.preflight.outputs.tag }}"
+          PREV_TAG="${{ steps.preflight.outputs.prev_tag }}"
           if [ ! -d "$STAGE" ]; then
             echo "::error::staging dir $STAGE not produced"; exit 1
           fi
@@ -111,17 +133,35 @@ jobs:
             exit 1
           fi
 
-          # Stash staging tree AND the release zip outside the worktree, since
-          # "git checkout --orphan" + clean will wipe dist/ before we attach
-          # the zip to the GitHub Release.
+          # Capture the main-branch commit now, before the orphan checkout
+          # below replaces the working tree - src/<TAG> marks this commit,
+          # and release-notes generation diffs against it.
+          MAIN_SHA=$(git rev-parse HEAD)
+
+          # Stash the staging tree, the release zip, AND .github/scripts/
+          # outside the worktree, since "git checkout --orphan" + clean will
+          # wipe dist/ and .github/ before we attach the zip to the GitHub
+          # Release / call the scripts again from the dispatch step below.
           TMP=$(mktemp -d)
           cp -a "$STAGE"/. "$TMP/"
+          mkdir -p "$TMP/.github/scripts"
+          cp -a .github/scripts/. "$TMP/.github/scripts/"
           ASSET_DIR=$(mktemp -d)
           cp "$ZIP" "$ASSET_DIR/"
           echo "asset=$ASSET_DIR/$(basename "$ZIP")" >> "$GITHUB_OUTPUT"
+          echo "tmp_dir=$TMP" >> "$GITHUB_OUTPUT"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Push the src/<TAG> marker unconditionally (pre-flight already
+          # proved it doesn't exist yet), pointing at the unmodified
+          # main-branch commit. This is what makes real release-notes
+          # generation possible below: the orphan `release` branch shares no
+          # history with `main`, so two orphan-branch tags have no
+          # merge-base to diff - two src/<TAG> tags on `main` do.
+          git tag "src/${TAG}" "$MAIN_SHA"
+          git push origin "src/${TAG}"
 
           git checkout --orphan release
           git rm -rf . > /dev/null 2>&1 || true
@@ -133,6 +173,10 @@ jobs:
           fi
 
           cp -a "$TMP"/. .
+          # .github/ was stashed above only so the dispatch step can reach
+          # the scripts after this checkout - it is not an install-ready
+          # file and must not land on the orphan release branch.
+          rm -rf ./.github
 
           echo "=== release branch contents ==="
           find . -mindepth 1 -not -path './.git*' | sort
@@ -144,18 +188,29 @@ jobs:
           SHA=$(git rev-parse HEAD)
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
+          # `gh release create --generate-notes` / `--notes-start-tag` can't
+          # be used on the orphan release commit/tag: the orphan branch has
+          # no merge-base with `main` or with any previous orphan release,
+          # so GitHub has no commit range to summarize. Diffing the
+          # src/<TAG> markers on `main` instead gives it two real, connected
+          # commits.
+          NOTES_ARGS=(-f tag_name="src/${TAG}" -f target_commitish="$MAIN_SHA")
+          if [ -n "$PREV_TAG" ]; then
+            NOTES_ARGS+=(-f previous_tag_name="src/${PREV_TAG}")
+          fi
+          gh api "repos/${{ github.repository }}/releases/generate-notes" "${NOTES_ARGS[@]}" --jq .body > "$RUNNER_TEMP/notes.md"
+
       - name: Create tag and GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          TAG="${{ steps.preflight.outputs.tag }}"
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --target "${{ steps.rel.outputs.sha }}" \
             --title "$TAG" \
-            --generate-notes \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             ${{ contains(inputs.version, '-') && '--prerelease' || '' }} \
             "${{ steps.rel.outputs.asset }}"
 
@@ -165,28 +220,28 @@ jobs:
       - name: Dispatch to agent-marketplace
         shell: bash
         env:
-          GH_PAT:  ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          GH_PAT:   ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION:  ${{ inputs.version }}
         run: |
           DESC=$(jq -r '.description' .claude-plugin/plugin.json)
           NAME=$(jq -r '.name'        .claude-plugin/plugin.json)
-          TAG="${NAME}--v${VERSION}"
+          TAG="${{ steps.preflight.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          TMP="${{ steps.rel.outputs.tmp_dir }}"
+
+          # `gh release view --jq .body` strips a real trailing newline the
+          # same way it "strips" an absent one, so the "&& printf x" / strip
+          # -x dance (not ";") is needed to tell the two apart - errexit
+          # does not propagate failure out of a `$(...)` substitution.
+          CHANGELOG=$(gh release view "$TAG" --repo "$REPO" --json body --jq .body && printf x)
+          CHANGELOG="${CHANGELOG%x}"
+          CHANGELOG="${CHANGELOG%$'\n'}"
+
+          NAME="$NAME" DESC="$DESC" REPO="$REPO" CATEGORY="skill" VERSION="$VERSION" TAG="$TAG" CHANGELOG="$CHANGELOG" \
+            "$TMP/.github/scripts/marketplace-payload.sh" | \
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_PAT" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/Seretos/agent-marketplace/dispatches \
-            -d @- <<EOF
-          {
-            "event_type": "plugin-release",
-            "client_payload": {
-              "name":        "${NAME}",
-              "description": "${DESC}",
-              "repo":        "${{ github.repository }}",
-              "category":    "skill",
-              "version":     "${VERSION}",
-              "ref":         "${TAG}",
-              "icon":        "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
-              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md"
-            }
-          }
-          EOF
+            -d @-

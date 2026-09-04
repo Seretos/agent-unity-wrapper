@@ -421,7 +421,7 @@ Describe 'SKILL.md -- three use cases documented: worktree, main checkout, adopt
     }
 }
 
-Describe 'SKILL.md -- Unity Hub adoption + host scope (ticket #47 / R7)' {
+Describe 'SKILL.md -- Unity Hub adoption + host scope (ticket #47 / R7, rewritten for ticket #52)' {
 
     It 'documents the "Unity Hub adoption" heading' {
         $global:skillmd_text | Should Match '### Unity Hub adoption'
@@ -429,14 +429,46 @@ Describe 'SKILL.md -- Unity Hub adoption + host scope (ticket #47 / R7)' {
 
     $adoptionSection = Get-Section -Text $global:skillmd_text -Heading '### Unity Hub adoption'
 
-    It 'the adoption section mentions the SessionStart hook (the automatic Claude Code path)' {
+    It 'the adoption section documents the PreToolUse hook (the automatic Claude Code path), contrasted with the old SessionStart design' {
+        $adoptionSection | Should Match '(?i)PreToolUse'
+        # A historical mention of SessionStart (contrasting the OLD design it
+        # replaced) is expected and desired here - not a leftover reference to
+        # a still-live SessionStart hook (guarded by the negative assertion
+        # below, which targets hooks.json/the script files, not prose).
         $adoptionSection | Should Match '(?i)SessionStart'
     }
 
-    It 'the adoption section states adoption is automatic on Claude Code only - Codex has no hook surface' {
+    It 'the adoption section documents the copy mechanism' {
+        $adoptionSection | Should Match '(?i)copy|copies|copying|copied'
+    }
+
+    It 'the adoption section states no privilege / no prepare-script precondition is required' {
+        # (?s) so "." also matches a newline - SKILL.md's prose wraps at ~80
+        # columns, so a short phrase can legitimately straddle a line break.
+        $adoptionSection | Should Match '(?is)no.{0,40}privilege|no Developer Mode'
+        $adoptionSection | Should Match '(?is)needs no.{0,60}prepare'
+    }
+
+    It 'the adoption section documents normalized path matching' {
+        $adoptionSection | Should Match '(?i)normalized'
+    }
+
+    It 'the adoption section states adoption is automatic on Claude Code only - Codex has no hook surface, and documents the manual Codex command' {
         $adoptionSection | Should Match '(?i)Claude Code'
         $adoptionSection | Should Match '(?i)Codex'
         $adoptionSection | Should Match '(?i)no hook surface'
+        $adoptionSection | Should Match 'scripts/unity-mcp-adopt\.ps1'
+    }
+
+    It 'hooks.json no longer declares a SessionStart hook (the actual live registration, not prose)' {
+        $hooksJsonPath = Join-Path $global:skillmd_repoRoot 'hooks\hooks.json'
+        $hooksJson = Get-Content -LiteralPath $hooksJsonPath -Raw | ConvertFrom-Json
+        ($hooksJson.hooks.PSObject.Properties.Name -contains 'SessionStart') | Should Be $false
+        ($hooksJson.hooks.PSObject.Properties.Name -contains 'PreToolUse') | Should Be $true
+    }
+
+    It 'hooks/session-start-adopt.ps1 no longer exists' {
+        Test-Path (Join-Path $global:skillmd_repoRoot 'hooks\session-start-adopt.ps1') | Should Be $false
     }
 
     It 'no longer instructs "Always start via worktree_start" after a direct start (adoption replaces the relaunch pitfall)' {

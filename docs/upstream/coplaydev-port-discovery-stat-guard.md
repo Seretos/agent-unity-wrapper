@@ -58,8 +58,18 @@ still resolvable by the time it is inspected.
 `port_discovery.py` lives in the vendored `mcpforunityserver` Python package, not in this
 repository - `agent-unity-wrapper` ships only skill content and a launch/adoption script
 that wraps the external Unity MCP server (see `AGENTS.md`). This document is the
-deliverable: a ready-to-file issue body, not a patch. Our own defensive cleanup
-(`Remove-StaleAdoptionLinks` in the generated `.seretos/unity-mcp-launch.ps1`, ticket #47)
-already deletes dangling adoption symlinks before every launch/adoption pass, which is our
-side of the mitigation - this upstream fix would close the remaining gap for any dangling
-link that survives long enough for a discovery scan to observe it in between.
+deliverable: a ready-to-file issue body, not a patch.
+
+**Ticket #52 update: this plugin no longer creates the symlinks that motivated this
+report.** Unity Hub adoption was rebuilt to **copy** the matching status file
+(`scripts/unity-mcp-adopt.ps1`) into `<checkout>/.unity-mcp/unity-mcp-status-adopted-<suffix>.json`
+instead of symlinking it, specifically because a symlink to a file the source editor
+might delete out from under it is exactly the shape of hazard this report describes - a
+plain copy cannot go dangling the way a symlink can, since there is no live indirection
+left to break. `Remove-StaleAdoptionLinks`/`Test-EntryIsLink` and the whole
+reparse-point-based cleanup apparatus are gone; a stale adopted copy is instead deleted
+outright when its port stops answering (see `scripts/unity-mcp-adopt.ps1`'s
+`Sync-AdoptedCopies`). The upstream `stat()` guard request above stands on its own merits
+regardless - it protects any dangling symlink a user or another tool might place in a
+Unity MCP status directory - but it is no longer this plugin's own mitigation for
+anything; the repro and suggested fix are otherwise unchanged.

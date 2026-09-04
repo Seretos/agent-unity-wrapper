@@ -66,12 +66,25 @@ function Write-Utf8NoBom {
 # load-order dependency).
 # ---------------------------------------------------------------------------
 function New-MaterializedLaunchScriptForPuw {
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("puw-launch-" + [System.IO.Path]::GetRandomFileName() + '.ps1')
+    # Ticket #52: the launch script now dot-sources its sibling
+    # scripts/unity-mcp-adopt.ps1 by $PSScriptRoot instead of defining
+    # adoption inline - materialize a REAL copy of that sibling alongside the
+    # extracted launch script (both under the same temp directory), so
+    # dot-sourcing the launch script in isolation (as every test below does)
+    # resolves $PSScriptRoot to a directory that actually contains it.
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("puw-launch-" + [System.IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $tmpDir | Out-Null
+    $tmp = Join-Path $tmpDir 'unity-mcp-launch.ps1'
     $src = $global:puw_launchScript
     if ([string]::IsNullOrEmpty($src)) {
-        $src = '# launchScript here-string not found in prepare-unity-worktree.ps1 (ticket #47 not yet implemented)'
+        $src = '# launchScript here-string not found in prepare-unity-worktree.ps1 (ticket #52 not yet implemented)'
     }
     Write-Utf8NoBom -Path $tmp -Content $src
+
+    $adoptSrcPath = Join-Path $global:puw_repoRoot 'scripts\unity-mcp-adopt.ps1'
+    if (Test-Path -LiteralPath $adoptSrcPath) {
+        Copy-Item -LiteralPath $adoptSrcPath -Destination (Join-Path $tmpDir 'unity-mcp-adopt.ps1') -Force
+    }
     return $tmp
 }
 
@@ -100,22 +113,15 @@ function Start-LocalFakeListener {
 }
 function Stop-LocalFakeListener { param($h) if ($h -and $h.Listener) { try { $h.Listener.Stop() } catch { } } }
 
-# Probe once whether this environment can create filesystem symlinks (mirrors
-# the probe in tests\unity-mcp-adopt.Tests.ps1 - see that file's .NOTES).
-$global:puw_symlinkCapable = $false
-try {
-    $probeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("puw-probe-" + [guid]::NewGuid())
-    New-Item -ItemType Directory -Path $probeDir | Out-Null
-    $probeTarget = Join-Path $probeDir 't.txt'
-    Set-Content -Path $probeTarget -Value 'x'
-    $probeLink = Join-Path $probeDir 'l.txt'
-    New-Item -ItemType SymbolicLink -Path $probeLink -Target $probeTarget -ErrorAction Stop | Out-Null
-    $global:puw_symlinkCapable = $true
-} catch {
-    $global:puw_symlinkCapable = $false
-} finally {
-    Remove-Item -Recurse -Force $probeDir -ErrorAction SilentlyContinue
+# Ticket #52 - a plain scratch dir for a GLOBAL status dir fixture (unlike
+# New-TempUnityRepo, which creates ProjectSettings/ - irrelevant, and
+# misleading, for a directory meant to stand in for ~/.unity-mcp).
+function New-PlainTempDir {
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("puw-global-" + [System.IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $tmp | Out-Null
+    return $tmp
 }
+function Remove-PlainTempDir { param($p) Remove-Item -Recurse -Force -Path $p -ErrorAction SilentlyContinue }
 
 # ---------------------------------------------------------------------------
 Describe 'prepare-unity-worktree.ps1 — managed block content' {
@@ -980,19 +986,23 @@ Describe 'launch script content — Library mirror empty-mainRoot guard (Finding
 }
 
 # ---------------------------------------------------------------------------
-# Ticket #47 / R3 — the launcher's three branches (live / dangling /
-# stale-but-present), reached from a single shared preamble that both
-# -AdoptOnly and a full launch invoke. The preamble + $launchScript do not
-# exist yet, so the structural assertions below are the driving RED; the
-# behavioural replica documents the intended decision table (established
-# "replicate the logic inline" style already used by the cache-server arg
-# filter above) and is not itself the RED-proving assertion.
+# Ticket #47 / R3 — the launcher's branches (live / nothing-present /
+# stale-but-present), reached from a shared preamble that the full launch
+# invokes. Ticket #52 retarget: adoption itself no longer lives inline in
+# $launchScript (it is dot-sourced from the sibling scripts/unity-mcp-adopt.ps1
+# - see the R8 Describe far below, which asserts the dot-source pattern AND
+# that the inline adoption functions are gone), so the old "the adoption
+# preamble (function Invoke-UnityMcpAdoption) appears exactly once" structural
+# assertion is retargeted to its new-contract shape below; the behavioural
+# replica documents the intended decision table (established "replicate the
+# logic inline" style already used by the cache-server arg filter above) and
+# is not itself the RED-proving assertion.
 # ---------------------------------------------------------------------------
-Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #47 / R3)' {
+Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #47 / R3, retargeted for ticket #52)' {
 
-    It 'structural: the adoption preamble (Invoke-UnityMcpAdoption) appears exactly once in $puw_launchScript' {
+    It 'structural: $puw_launchScript no longer defines Invoke-UnityMcpAdoption inline (ticket #52 - moved to scripts/unity-mcp-adopt.ps1)' {
         $text = [string]$global:puw_launchScript
-        ([regex]::Matches($text, 'function Invoke-UnityMcpAdoption')).Count | Should Be 1
+        ([regex]::Matches($text, 'function Invoke-UnityMcpAdoption')).Count | Should Be 0
     }
 
     It 'structural: the managed block''s default step invokes .seretos/unity-mcp-launch.ps1 with -Variant default' {
@@ -1027,15 +1037,10 @@ Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #4
     # .NOTES for the sibling Find-AdoptionCandidate/Invoke-UnityMcpAdoption
     # contract this shares a status-dir format with).
     #
-    # "Dangling" specifically (a link whose target vanished) is exercised at
-    # the Remove-StaleAdoptionLinks level in tests\unity-mcp-adopt.Tests.ps1's
-    # R2 Describe (gated by symlink capability, unavailable in this sandbox -
-    # see that file's .NOTES). Get-UnityMcpLaunchDecision itself only needs to
-    # answer "is there a live status file in StatusDir right now" - by the
-    # time it runs, the preamble has already deleted dangling links, so
-    # "dangling" and "nothing present" are the same input to this function.
-    # The symlink-capable-gated test below still exercises the real dangling
-    # case end-to-end (cleanup + decision) when privilege allows it.
+    # Ticket #52: liveness is a TCP-probe-only check (no heartbeat-age gate,
+    # no symlink/dangling-link concept - see scripts/unity-mcp-adopt.ps1 and
+    # tests\unity-mcp-adopt.Tests.ps1's R3/R11 notes). Get-UnityMcpLaunchDecision
+    # no longer accepts -HeartbeatMaxAgeSeconds.
     It 'live: a fresh status file yields already-connected and Start-UnityEditor is not called' {
         $checkout = New-TempUnityRepo
         $fake = $null
@@ -1050,7 +1055,7 @@ Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #4
             $decision = $null
             $threw = $false
             try {
-                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -PortProbeTimeoutMs 500
             } catch { $threw = $true }
 
             # Expected RED: Get-UnityMcpLaunchDecision is not defined yet (no
@@ -1065,38 +1070,6 @@ Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #4
             if ($fake) { Stop-LocalFakeListener $fake }
             Remove-TempUnityRepo $checkout
         }
-    }
-
-    It 'symlink-capable only: a genuinely dangling link is removed by the preamble and the decision is still launch' {
-        if (-not $global:puw_symlinkCapable) {
-            Write-Warning 'symlink creation unsupported in this sandbox (no Developer Mode / admin) - skipping this real-fixture test; coverage carried by the three tests above plus tests\unity-mcp-adopt.Tests.ps1''s R2 Describe.'
-            return
-        }
-        $checkout = New-TempUnityRepo
-        try {
-            $statusDir = Join-Path $checkout '.unity-mcp'
-            New-Item -ItemType Directory -Force -Path $statusDir | Out-Null
-            $targetDir = New-TempUnityRepo
-            $target = Join-Path $targetDir 'unity-mcp-status-9999.json'
-            Set-Content -Path $target -Value '{}' -Encoding UTF8
-            $linkPath = Join-Path $statusDir 'unity-mcp-status-9999.json'
-            New-Item -ItemType SymbolicLink -Path $linkPath -Target $target -ErrorAction Stop | Out-Null
-            Remove-Item -Path $target -Force
-            Remove-TempUnityRepo $targetDir
-
-            $launchScriptPath = New-MaterializedLaunchScriptForPuw
-            . $launchScriptPath
-
-            $threw = $false
-            try {
-                Remove-StaleAdoptionLinks -StatusDir $statusDir
-            } catch { $threw = $true }
-            $threw | Should Be $false
-            @(Get-ChildItem -Path $statusDir -Force | Select-Object -ExpandProperty Name) | Should Not Contain 'unity-mcp-status-9999.json'
-
-            $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
-            $decision | Should Be 'launch'
-        } finally { Remove-TempUnityRepo $checkout }
     }
 }
 
@@ -1128,7 +1101,7 @@ Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #4
             $decision = $null
             $threw = $false
             try {
-                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -PortProbeTimeoutMs 500
             } catch { $threw = $true }
             $threw | Should Be $false
             $decision | Should Be 'launch'
@@ -1158,7 +1131,7 @@ Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #4
             $decision = $null
             $threw = $false
             try {
-                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -PortProbeTimeoutMs 500
             } catch { $threw = $true }
             $threw | Should Be $false
             $decision | Should Be 'launch'
@@ -1208,7 +1181,7 @@ Describe 'prepare-unity-worktree.ps1 - launcher three-branch decision (ticket #4
             $decision = $null
             $threw = $false
             try {
-                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -HeartbeatMaxAgeSeconds 60 -PortProbeTimeoutMs 500
+                $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir -PortProbeTimeoutMs 500
             } catch { $threw = $true }
 
             # Expected RED (pre-fix): the unguarded [int]$data.port cast in
@@ -1423,5 +1396,190 @@ Describe 'prepare-unity-worktree.ps1 - version-pin strategy is internally couple
         $skillPath = Join-Path $global:puw_repoRoot 'skills\unity-wrapper\SKILL.md'
         $skillText = [System.IO.File]::ReadAllText($skillPath)
         $skillText | Should Match '### Version-pin strategy'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #52 / R7 - environment_start's launcher still adopts before deciding
+# to launch, now against the NEW contract (status file only, no paired port
+# file, TCP-probe-only liveness) rather than the #47 symlink/port-file/
+# heartbeat-age mechanism the current $launchScript here-string still
+# implements. This test's fixture is deliberately new-contract-shaped (no
+# unity-mcp-port-<port>.json alongside the status file) so it RED's against
+# TODAY's Find-AdoptionCandidate, which still `continue`s (rejects) a
+# candidate lacking a paired port file (see scripts\prepare-unity-worktree.ps1
+# around the `$portFile` / Test-Path guard) - the candidate is never adopted,
+# Get-UnityMcpLaunchDecision falls through to 'launch', and Start-UnityEditor
+# IS called, failing the -Times 0 assertion below. This is the #52 second
+# finding (R4) reflected at the launcher-flow level (R7), not a fresh
+# behavioural claim invented for this file.
+#
+# One Describe, one `Mock Start-UnityEditor` - same Pester 3.4.0 hygiene
+# already established by every other Mock-using Describe in this file (a
+# second `Mock` of the same name in a later It of the SAME Describe silently
+# fails to re-hook).
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - launcher adopts a live Hub candidate before deciding to launch (ticket #52 / R7)' {
+
+    It 'a live Hub candidate in the global dir (status file only, no paired port file) is adopted; Start-UnityEditor is not called' {
+        $checkout  = New-TempUnityRepo
+        $globalDir = New-PlainTempDir
+        $fake = $null
+        try {
+            $fake = Start-LocalFakeListener
+            $obj = [pscustomobject]@{
+                project_path   = (Join-Path $checkout 'Assets')
+                unity_port     = $fake.Port
+                last_heartbeat = (Get-Date).ToUniversalTime().ToString('o')
+            }
+            # Deliberately NO paired unity-mcp-port-<port>.json.
+            ($obj | ConvertTo-Json) | Set-Content -Path (Join-Path $globalDir "unity-mcp-status-$($fake.Port).json") -Encoding UTF8
+
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            Mock Start-UnityEditor { }
+            Invoke-UnityMcpLauncherFlow -CheckoutPath $checkout -GlobalStatusDir $globalDir
+
+            # Expected RED: today's Find-AdoptionCandidate rejects this
+            # candidate for lack of a paired port file, so adoption never
+            # happens and Get-UnityMcpLaunchDecision falls through to
+            # 'launch' - Start-UnityEditor IS called, failing this assertion.
+            Assert-MockCalled Start-UnityEditor -Times 0 -Exactly
+
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            @(Get-ChildItem -Path $statusDir -Filter 'unity-mcp-status-adopted-*.json' -File -ErrorAction SilentlyContinue).Count | Should Be 1
+        } finally {
+            if ($fake) { Stop-LocalFakeListener $fake }
+            Remove-TempUnityRepo $checkout
+            Remove-PlainTempDir $globalDir
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Test-critic fix (note 1): the R7 Describe above only asserted the "adopted
+# candidate -> Start-UnityEditor NOT called" half. Add the missing other
+# half in its OWN Describe (Pester 3.4.0 Mock-per-Describe hygiene, same
+# pattern as every other Mock-using Describe in this file): with NOTHING
+# live anywhere (no candidate in the global dir at all, under the new
+# no-port-file contract), the launcher must still fall through to launch and
+# call Start-UnityEditor exactly once - this is what actually drives real
+# behavior rather than a wrong implementation that always adopts (or always
+# skips launch) regardless of what it finds.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - launcher does not adopt when nothing is live; Start-UnityEditor is called (ticket #52 / R7 continued)' {
+
+    It 'no candidate anywhere in the global dir: no adopted copy is created and Start-UnityEditor is called exactly once' {
+        $checkout  = New-TempUnityRepo
+        $globalDir = New-PlainTempDir
+        try {
+            $launchScriptPath = New-MaterializedLaunchScriptForPuw
+            . $launchScriptPath
+
+            Mock Start-UnityEditor { }
+            Invoke-UnityMcpLauncherFlow -CheckoutPath $checkout -GlobalStatusDir $globalDir
+            Assert-MockCalled Start-UnityEditor -Times 1 -Exactly
+
+            $statusDir = Join-Path $checkout '.unity-mcp'
+            @(Get-ChildItem -Path $statusDir -Filter 'unity-mcp-status-adopted-*.json' -File -ErrorAction SilentlyContinue).Count | Should Be 0
+        } finally {
+            Remove-TempUnityRepo $checkout
+            Remove-PlainTempDir $globalDir
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #52 / R8 - the prepare-script materializes scripts/unity-mcp-adopt.ps1
+# verbatim into .seretos/, always overwritten (same ownership model as
+# .seretos/unity-mcp-launch.ps1 - see that Describe above), while
+# .seretos/worktree-setup.yml keeps its existing existence-based ownership
+# untouched. The generated launch script dot-sources the sibling by
+# $PSScriptRoot instead of defining adoption inline.
+# ---------------------------------------------------------------------------
+Describe 'prepare-unity-worktree.ps1 - materializes scripts/unity-mcp-adopt.ps1 into .seretos/ verbatim, always (ticket #52 / R8)' {
+
+    It 'writes .seretos/unity-mcp-adopt.ps1 byte-identical to scripts/unity-mcp-adopt.ps1 on a fresh repo' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $dest = Join-Path $tmp '.seretos\unity-mcp-adopt.ps1'
+
+            # Expected RED: the prepare-script does not write this file at all yet.
+            Test-Path $dest | Should Be $true
+
+            $srcPath = Join-Path $global:puw_repoRoot 'scripts\unity-mcp-adopt.ps1'
+            (Get-Content -LiteralPath $dest -Raw) | Should Be (Get-Content -LiteralPath $srcPath -Raw)
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'overwrites a hand-modified copy without -Force; worktree-setup.yml stays byte-identical' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $dest      = Join-Path $tmp '.seretos\unity-mcp-adopt.ps1'
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+
+            # Expected RED: $dest does not exist yet on this run, so Add-Content
+            # below creates a bare sentinel-only file rather than "hand-editing"
+            # a real generated copy - the subsequent re-run still can't produce
+            # the real generated content because the prepare-script does not
+            # write this file at all yet.
+            Add-Content -Path $dest -Value '# SENTINEL-HAND-EDIT' -ErrorAction SilentlyContinue
+            Add-Content -Path $setupPath -Value '# SENTINEL-HAND-EDIT'
+            $ymlBefore = Get-Content -LiteralPath $setupPath -Raw
+
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+
+            # test-critic fix (note 3): a truncate-to-empty would also satisfy
+            # "does not match SENTINEL-HAND-EDIT" without proving the REAL
+            # generated content was restored. Assert full byte-identity
+            # against the actual source, same as the fresh-repo case above.
+            $srcPath = Join-Path $global:puw_repoRoot 'scripts\unity-mcp-adopt.ps1'
+            (Get-Content -LiteralPath $dest -Raw) | Should Not Match 'SENTINEL-HAND-EDIT'
+            (Get-Content -LiteralPath $dest -Raw) | Should Be (Get-Content -LiteralPath $srcPath -Raw)
+            (Get-Content -LiteralPath $setupPath -Raw) | Should Be $ymlBefore
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'a second run is a no-op except the .seretos/unity-mcp-adopt.ps1 overwrite' {
+        $tmp = New-TempUnityRepo
+        try {
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+            $dest      = Join-Path $tmp '.seretos\unity-mcp-adopt.ps1'
+            $setupPath = Join-Path $tmp '.seretos\worktree-setup.yml'
+            $ymlBefore = Get-Content -LiteralPath $setupPath -Raw
+
+            & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
+
+            Test-Path $dest | Should Be $true
+            (Get-Content -LiteralPath $setupPath -Raw) | Should Be $ymlBefore
+        } finally { Remove-TempUnityRepo $tmp }
+    }
+
+    It 'the generated launch script dot-sources the sibling unity-mcp-adopt.ps1 by $PSScriptRoot instead of defining adoption inline' {
+        # test-critic fix (note 4): three generic substring greps (Join-Path,
+        # $PSScriptRoot, unity-mcp-adopt.ps1) could each already be true of
+        # pre-existing code for unrelated reasons without the script actually
+        # dot-sourcing anything. Strengthen to (a) an actual dot-source
+        # operator pattern - a literal ". " invocation immediately followed by
+        # an expression that resolves to unity-mcp-adopt.ps1, not just a
+        # mention of the filename anywhere - and (b) assert the inline
+        # adoption functions are no longer DEFINED in the generated script's
+        # own text (a `function <Name>` declaration), which a wrong
+        # implementation that merely ADDS a dot-source line while leaving the
+        # old inline definitions in place would still fail.
+        $text = [string]$global:puw_launchScript
+        $text | Should Match '(?m)^\s*\.\s+\(?\s*Join-Path\s+\$PSScriptRoot\s+[''"]unity-mcp-adopt\.ps1[''"]'
+
+        $inlineAdoptionFunctions = @(
+            'Find-AdoptionCandidate', 'Invoke-UnityMcpAdoption', 'Get-UnityMcpLaunchDecision',
+            'New-AdoptionSymlink', 'Remove-StaleAdoptionLinks', 'Test-EntryIsLink',
+            'Test-StatusFileLive', 'Get-ComparablePath', 'Test-TcpPortOpen'
+        )
+        foreach ($fn in $inlineAdoptionFunctions) {
+            $text | Should Not Match "function\s+$([regex]::Escape($fn))\b"
+        }
     }
 }

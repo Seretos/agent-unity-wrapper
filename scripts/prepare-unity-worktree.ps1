@@ -25,10 +25,14 @@
   `.seretos/unity-mcp-launch.ps1` is the opposite ownership model (ticket #47):
   it is generated content owned outright by this plugin and is **always
   overwritten** on every run - even without `-Force` - carrying a
-  "do not hand-edit" header. It holds the actual launch + Unity Hub-adoption
-  logic shared by both the managed `start:` steps and the SessionStart hook
-  (`hooks/session-start-adopt.ps1`), since a repo-local generated file is the
-  only location both callers can reach.
+  "do not hand-edit" header. It holds the launch decision + Unity launch
+  logic; Unity Hub adoption itself lives in the plugin-owned
+  `scripts/unity-mcp-adopt.ps1` (ticket #52), materialized verbatim into
+  `.seretos/unity-mcp-adopt.ps1` (same always-overwritten ownership model,
+  see step 2 below) and dot-sourced by the generated launch script, so
+  `environment_start`'s launcher and the `PreToolUse` hook
+  (`hooks/hooks.json` -> `scripts/unity-mcp-adopt.ps1`) run the exact same
+  adoption implementation without duplicating it.
 
   What it ensures:
     1. `.seretos/worktree-setup.yml` carries a managed `start:`/`stop:` block with two
@@ -36,14 +40,20 @@
        thin call into `.seretos/unity-mcp-launch.ps1 -Variant <default|gui>` (below).
        `isolation` is set to `full` in a freshly-created contract (the contract forbids
        start/stop under `none`); an existing file's `isolation` is never read or edited.
-    2. `.seretos/unity-mcp-launch.ps1` carries the actual launch body: Unity Hub
-       adoption/cleanup, the launch decision (already-connected vs. launch), editor
-       resolution, `UNITY_MCP_STATUS_DIR=<checkout>/.unity-mcp` (absolute), the
-       `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi` boot, the Library
-       mirror, the cache-server flags, and the `unity.pid` file. Always regenerated.
-    3. The Unity MCP bridge package (`com.coplaydev.unity-mcp`) is referenced in
+    2. `.seretos/unity-mcp-adopt.ps1` is a verbatim copy of
+       `scripts/unity-mcp-adopt.ps1` (ticket #52 Unity Hub adoption), always
+       regenerated so an updated adoption implementation reaches every
+       already-prepared repo the next time this script runs.
+    3. `.seretos/unity-mcp-launch.ps1` carries the launch body: dot-sources its
+       sibling `unity-mcp-adopt.ps1` and runs it as a preamble, then decides
+       already-connected vs. launch, resolves the editor, sets
+       `UNITY_MCP_STATUS_DIR=<checkout>/.unity-mcp` (absolute), boots via
+       `-executeMethod MCPForUnity.Editor.McpCiBoot.StartStdioForCi`, mirrors
+       the Library, applies the cache-server flags, and writes the
+       `unity.pid` file. Always regenerated.
+    4. The Unity MCP bridge package (`com.coplaydev.unity-mcp`) is referenced in
        `Packages/manifest.json`.
-    4. `.gitignore` ignores the runtime `.unity-mcp/` status dir.
+    5. `.gitignore` ignores the runtime `.unity-mcp/` status dir.
 
 .PARAMETER RepoRoot
   Target Unity repository root. Defaults to `git rev-parse --show-toplevel` (works
@@ -144,17 +154,18 @@ stop:
 # <<< agent-unity-wrapper managed
 '@
 
-# Shared launch + Unity Hub-adoption body (ticket #47). Written into
-# <repo>/.seretos/unity-mcp-launch.ps1 (always overwritten - see step 4 below).
-# Single-quoted here-string: every `$` below belongs to the pwsh that later
-# runs this file, not to this prepare-script. Reached from two call sites:
-# the managed start: steps above (-Variant default|gui) and the SessionStart
-# hook (hooks/session-start-adopt.ps1, -AdoptOnly) - one algorithm, not two.
+# Shared launch body (ticket #47); Unity Hub adoption itself lives in the
+# sibling scripts/unity-mcp-adopt.ps1 (ticket #52), dot-sourced below.
+# Written into <repo>/.seretos/unity-mcp-launch.ps1 (always overwritten - see
+# step 3 below). Single-quoted here-string: every `$` below belongs to the
+# pwsh that later runs this file, not to this prepare-script.
 $launchScript = @'
 # >>> agent-unity-wrapper generated: unity-mcp-launch.ps1 - do not hand-edit; re-run scripts/prepare-unity-worktree.ps1 to update
 <#
 .SYNOPSIS
-  Shared Unity MCP launch + Unity Hub-adoption logic (ticket #47).
+  Shared Unity MCP launch logic (ticket #47). Unity Hub adoption is
+  delegated to the sibling unity-mcp-adopt.ps1 (ticket #52), dot-sourced by
+  $PSScriptRoot so both live side by side in .seretos/.
 
 .DESCRIPTION
   Generated into <repo>/.seretos/unity-mcp-launch.ps1 by
@@ -162,318 +173,32 @@ $launchScript = @'
   hand-edited (unlike .seretos/worktree-setup.yml, which stays
   existence-based - see that script's header).
 
-  Two entry points call into this same file:
-    - The managed start: steps (default/gui) run it as a full launch:
-        & unity-mcp-launch.ps1 -Variant <default|gui> -CheckoutPath <path>
-      This runs the Hub-adoption preamble, decides whether a live editor is
-      already connected (adopted or this session's own prior instance), and
-      launches Unity only when neither is true.
-    - hooks/session-start-adopt.ps1 (Claude Code SessionStart hook) runs it
-      adoption-only, so a Hub-started editor is discovered with no agent
-      action and Unity is never launched by the hook itself:
-        & unity-mcp-launch.ps1 -AdoptOnly -CheckoutPath <path>
+  The managed start: steps (default/gui) run it as a full launch:
+    & unity-mcp-launch.ps1 -Variant <default|gui> -CheckoutPath <path>
+  This runs the Hub-adoption pass as a preamble (via the dot-sourced
+  unity-mcp-adopt.ps1), decides whether a live editor is already connected
+  (adopted or this session's own prior instance), and launches Unity only
+  when neither is true.
+
+  A Hub-started editor is separately discovered before every Unity MCP tool
+  call by hooks/hooks.json's PreToolUse hook, which runs
+  scripts/unity-mcp-adopt.ps1 directly - not through this launch script.
 #>
 param(
     [ValidateSet('default', 'gui')]
     [string]$Variant = 'default',
     [string]$CheckoutPath,
-    [switch]$AdoptOnly,
     [string]$GlobalStatusDir = (Join-Path $HOME '.unity-mcp')
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell 5.1 does not define $IsWindows; treat its absence as Windows.
 $script:OnWindows = if ($null -ne $IsWindows) { $IsWindows } else { $true }
 
-# Adoption liveness thresholds - named script constants so both entry points
-# agree and a test can name the boundary it exercises.
-$HeartbeatMaxAgeSeconds = 60
-$PortProbeTimeoutMs     = 500
-
-function Test-TcpPortOpen {
-    param(
-        [Parameter(Mandatory)][int]$Port,
-        [int]$TimeoutMs = 500
-    )
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $async = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
-        try { $client.EndConnect($async) } catch { return $false }
-        return $true
-    } catch {
-        return $false
-    } finally {
-        $client.Close()
-    }
-}
-
-function Get-StatusFileHeartbeatAgeSeconds {
-    # ConvertFrom-Json auto-detects an ISO-8601 "Z" string and hands back an
-    # already-parsed [datetime] rather than a string - stringifying it first
-    # (via ToString()) and re-parsing loses the 'Z'/offset and silently drops
-    # to Kind=Unspecified, which ToUniversalTime() then mis-shifts by the
-    # local timezone offset. Use the [datetime] directly when we already have
-    # one; only Parse a plain string. Either way, an Unspecified Kind here
-    # means the numeric clock value IS the UTC wall-clock reading (the "Z"
-    # was simply not preserved as a Kind tag) - retag it Utc, do not shift it.
-    #
-    # Field names verified against the real mcpforunityserver==9.7.1 wheel
-    # (review round 3 "needs verification" finding): the status file JSON
-    # written/read by the wrapped server uses `last_heartbeat`, not
-    # `heartbeat` (transport/legacy/port_discovery.py, both
-    # discover_all_unity_instances() and discover_unity_port() read
-    # data.get('last_heartbeat')). Confirmed by downloading and inspecting
-    # the actual published wheel - see the change report for the exact
-    # source lines.
-    param([Parameter(Mandatory)]$Data)
-    $raw = $Data.last_heartbeat
-    $hb = if ($raw -is [datetime]) { $raw } else {
-        [datetime]::Parse([string]$raw, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
-    }
-    if ($hb.Kind -eq [System.DateTimeKind]::Unspecified) {
-        $hb = [datetime]::SpecifyKind($hb, [System.DateTimeKind]::Utc)
-    }
-    return ((Get-Date).ToUniversalTime() - $hb.ToUniversalTime()).TotalSeconds
-}
-
-function Test-StatusFileLive {
-    # Shared liveness predicate (heartbeat age + port probe) for a single
-    # status file, factored out so Invoke-UnityMcpAdoption's "is the existing
-    # real status file actually live" check and Get-UnityMcpLaunchDecision's
-    # scan agree on exactly one definition of "live" (review round 1 finding).
-    param(
-        [Parameter(Mandatory)][string]$StatusFilePath,
-        [int]$HeartbeatMaxAgeSeconds = $HeartbeatMaxAgeSeconds,
-        [int]$PortProbeTimeoutMs = $PortProbeTimeoutMs
-    )
-    $data = $null
-    try { $data = Get-Content -LiteralPath $StatusFilePath -Raw | ConvertFrom-Json } catch { return $false }
-    # Field names: last_heartbeat / unity_port, not heartbeat / port - see
-    # Get-StatusFileHeartbeatAgeSeconds's header comment (review round 3
-    # verified-against-upstream fix).
-    if (-not $data.last_heartbeat -or -not $data.unity_port) { return $false }
-    $age = $null
-    try { $age = Get-StatusFileHeartbeatAgeSeconds -Data $data } catch { return $false }
-    if ($age -gt $HeartbeatMaxAgeSeconds) { return $false }
-    # A malformed/non-numeric port (partially written or corrupted status
-    # file) must be treated as "not live", not allowed to throw a
-    # terminating exception - the generated launch script runs under
-    # $ErrorActionPreference = 'Stop', so an unguarded [int] cast here would
-    # otherwise abort every caller's scanning loop, not just this one file
-    # (review round 2 blocking finding).
-    $port = $null
-    try { $port = [int]$data.unity_port } catch { return $false }
-    if (-not (Test-TcpPortOpen -Port $port -TimeoutMs $PortProbeTimeoutMs)) { return $false }
-    return $true
-}
-
-function Test-EntryIsLink {
-    # Self-identifying reparse-point check - no marker file. Works for both
-    # PS7's LinkType property and PS 5.1's Attributes bitmask.
-    param([Parameter(Mandatory)]$Entry)
-    if ($Entry.PSObject.Properties.Name -contains 'LinkType' -and $Entry.LinkType) { return $true }
-    if ($Entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $true }
-    return $false
-}
-
-function Find-AdoptionCandidate {
-    param(
-        [Parameter(Mandatory)][string]$CheckoutPath,
-        [Parameter(Mandatory)][string]$GlobalStatusDir,
-        [int]$HeartbeatMaxAgeSeconds = $HeartbeatMaxAgeSeconds,
-        [int]$PortProbeTimeoutMs = $PortProbeTimeoutMs
-    )
-    if (-not (Test-Path -LiteralPath $GlobalStatusDir)) { return $null }
-    $targetAssets = (Join-Path $CheckoutPath 'Assets').TrimEnd('\', '/').Replace('\', '/')
-    $candidates = Get-ChildItem -LiteralPath $GlobalStatusDir -Filter 'unity-mcp-status-*.json' -File -ErrorAction SilentlyContinue
-    foreach ($sf in $candidates) {
-        $data = $null
-        try { $data = Get-Content -LiteralPath $sf.FullName -Raw | ConvertFrom-Json } catch { continue }
-        if (-not $data.project_path) { continue }
-        $candidatePath = ([string]$data.project_path).TrimEnd('\', '/').Replace('\', '/')
-        # -ne here relies on PowerShell's default culture-invariant, case-insensitive
-        # string comparison (only -cne is case-sensitive) - intentional, not an oversight,
-        # so a Windows drive-letter/casing difference still matches.
-        if ($candidatePath -ne $targetAssets) { continue }
-        # Field names: last_heartbeat / unity_port, not heartbeat / port - see
-        # Get-StatusFileHeartbeatAgeSeconds's header comment (review round 3
-        # verified-against-upstream fix).
-        if (-not $data.last_heartbeat) { continue }
-        $age = $null
-        try { $age = Get-StatusFileHeartbeatAgeSeconds -Data $data } catch { continue }
-        if ($age -gt $HeartbeatMaxAgeSeconds) { continue }
-        if (-not $data.unity_port) { continue }
-        # Same malformed-port guard as Test-StatusFileLive above: a
-        # non-numeric port must be skipped (treated as "not a match"), not
-        # allowed to throw and abort the scan of every other candidate
-        # (review round 2 blocking finding).
-        $port = $null
-        try { $port = [int]$data.unity_port } catch { continue }
-        if (-not (Test-TcpPortOpen -Port $port -TimeoutMs $PortProbeTimeoutMs)) { continue }
-        $portFileName = $sf.Name -replace 'status', 'port'
-        $portFile = Join-Path $GlobalStatusDir $portFileName
-        # A cleanup race (the candidate's editor exits between this scan and the
-        # symlink step) can leave the status file behind with its port file
-        # already gone - verify the derived port file still exists before
-        # returning this candidate, or a dangling symlink is manufactured (the
-        # hazard documented in docs/upstream/coplaydev-port-discovery-stat-guard.md).
-        if (-not (Test-Path -LiteralPath $portFile)) { continue }
-        return @{ StatusFile = $sf.FullName; PortFile = $portFile }
-    }
-    return $null
-}
-
-function New-AdoptionSymlink {
-    # Thin, side-effecting wrapper around New-Item -ItemType SymbolicLink so
-    # it can be mocked (e.g. to simulate a denied symlink without needing
-    # real Developer Mode/admin privilege). Only ever removes an existing
-    # entry at LinkPath when it is itself a symlink/reparse-point
-    # (Test-EntryIsLink) - same gate Remove-StaleAdoptionLinks already uses.
-    # A real (non-link) file already occupying LinkPath must never be
-    # clobbered: since Invoke-UnityMcpAdoption now deliberately proceeds past
-    # a stale real status file instead of returning early, a same-named Hub
-    # candidate's adoption could otherwise silently delete that real local
-    # file (review round 2 blocking finding).
-    param(
-        [Parameter(Mandatory)][string]$LinkPath,
-        [Parameter(Mandatory)][string]$Target
-    )
-    $existing = Get-Item -LiteralPath $LinkPath -Force -ErrorAction SilentlyContinue
-    if ($existing) {
-        if (-not (Test-EntryIsLink -Entry $existing)) {
-            throw "Refusing to adopt: a real (non-symlink) file already exists at '$LinkPath'. Not overwriting it."
-        }
-        Remove-Item -LiteralPath $LinkPath -Force -ErrorAction SilentlyContinue
-    }
-    New-Item -ItemType SymbolicLink -Path $LinkPath -Target $Target -ErrorAction Stop | Out-Null
-}
-
-function Remove-StaleAdoptionLinks {
-    # Deletes every symlink/reparse-point entry in StatusDir unconditionally -
-    # no marker file, self-identifying via Test-EntryIsLink. Leaves real files
-    # (this session's own prior status file) untouched. Cleans up both a
-    # dangling link (target deleted) and a still-live one, which the adoption
-    # pass below re-creates if still warranted - cleanup is unconditional.
-    param([Parameter(Mandatory)][string]$StatusDir)
-    if (-not (Test-Path -LiteralPath $StatusDir)) { return }
-    Get-ChildItem -LiteralPath $StatusDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        if (Test-EntryIsLink -Entry $_) {
-            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Invoke-UnityMcpAdoption {
-    # The full preamble, run unconditionally by both entry points (-AdoptOnly
-    # and a full launch): clean stale links, then adopt a live Hub-started
-    # editor for this checkout if one exists and none is already connected.
-    param(
-        [Parameter(Mandatory)][string]$CheckoutPath,
-        [Parameter(Mandatory)][string]$GlobalStatusDir,
-        [int]$HeartbeatMaxAgeSeconds = $HeartbeatMaxAgeSeconds,
-        [int]$PortProbeTimeoutMs = $PortProbeTimeoutMs
-    )
-    $statusDir = Join-Path $CheckoutPath '.unity-mcp'
-    New-Item -ItemType Directory -Force -Path $statusDir | Out-Null
-
-    Remove-StaleAdoptionLinks -StatusDir $statusDir
-
-    # Scan both status AND port files (real, non-link) - a crashed prior
-    # instance leaves both behind under the same port-derived names, so a
-    # collision with a re-adopted candidate can land on either one (review
-    # round 3 blocking fix). Test-StatusFileLive only ever returns $true for
-    # a status file (a port file's JSON has no last_heartbeat field, so it
-    # always reads as "not live") - a real port file can therefore never
-    # cause a false early-return here, only ever end up correctly classified
-    # as stale below.
-    $existingRealStatus = Get-ChildItem -LiteralPath $statusDir -Force -Filter 'unity-mcp-status-*.json' -File -ErrorAction SilentlyContinue |
-        Where-Object { -not (Test-EntryIsLink -Entry $_) }
-    $existingRealPort = Get-ChildItem -LiteralPath $statusDir -Force -Filter 'unity-mcp-port-*.json' -File -ErrorAction SilentlyContinue |
-        Where-Object { -not (Test-EntryIsLink -Entry $_) }
-    $existingReal = @($existingRealStatus) + @($existingRealPort)
-    $staleReal = @()
-    if ($existingReal) {
-        $liveReal = $existingReal | Where-Object {
-            Test-StatusFileLive -StatusFilePath $_.FullName -HeartbeatMaxAgeSeconds $HeartbeatMaxAgeSeconds -PortProbeTimeoutMs $PortProbeTimeoutMs
-        }
-        if ($liveReal) { return }
-        # Every existing real file is stale (e.g. a crashed prior instance) -
-        # do NOT let its mere presence block scanning for a Hub-started
-        # editor (review round 1 blocking finding). Left in place UNLESS its
-        # leaf name collides with the candidate adopted below (review round 3
-        # blocking fix, see the comment at the removal site) - only symlink
-        # entries are otherwise ever removed by this preamble
-        # (Remove-StaleAdoptionLinks above); a non-colliding stale real file
-        # is harmless once Get-UnityMcpLaunchDecision scans every status file
-        # for liveness rather than trusting any one of them.
-        $staleReal = $existingReal
-    }
-
-    $candidate = Find-AdoptionCandidate -CheckoutPath $CheckoutPath -GlobalStatusDir $GlobalStatusDir -HeartbeatMaxAgeSeconds $HeartbeatMaxAgeSeconds -PortProbeTimeoutMs $PortProbeTimeoutMs
-    if (-not $candidate) { return }
-
-    $statusLink = Join-Path $statusDir (Split-Path -Leaf $candidate.StatusFile)
-    $portLink   = Join-Path $statusDir (Split-Path -Leaf $candidate.PortFile)
-
-    # Collision guard (review round 3 blocking fix): a stale real file already
-    # proven stale above may happen to share its leaf name with the adoption
-    # candidate's target filename - filenames are port-derived and a crashed
-    # instance's port can be reused. New-AdoptionSymlink refuses
-    # unconditionally on ANY real (non-link) file at its destination, so
-    # leaving a proven-stale collider in place would wedge adoption (and the
-    # fallback launch, since Invoke-UnityMcpLauncherFlow always adopts first)
-    # with no automatic recovery. Remove exactly the colliding stale file(s) -
-    # never every stale file - so a non-colliding one still survives untouched
-    # (the round 1 invariant, asserted by the sibling Describe above).
-    foreach ($linkPath in @($statusLink, $portLink)) {
-        $collision = $staleReal | Where-Object { $_.FullName -eq $linkPath }
-        if ($collision) {
-            Remove-Item -LiteralPath $linkPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    try {
-        New-AdoptionSymlink -LinkPath $statusLink -Target $candidate.StatusFile
-        New-AdoptionSymlink -LinkPath $portLink   -Target $candidate.PortFile
-    } catch {
-        # The Developer-Mode/Administrator remedy only applies to a genuine
-        # permission/access-denied failure. New-AdoptionSymlink can also throw
-        # its own "a real (non-symlink) file already exists" error for a
-        # reason the collision guard above didn't catch - e.g. a real file
-        # created at $statusLink/$portLink in the race window between the
-        # $existingReal scan (which covers both status and port files - see
-        # above) and this call - attaching the Developer-Mode remedy to THAT
-        # cause is nonsensical and misleads whoever reads the error (review
-        # round 3 nit).
-        $isPermissionError = ($_.Exception -is [System.UnauthorizedAccessException]) -or
-            ($_.Exception.Message -match '(?i)access is denied|administrator privilege|privilege is required|permission denied')
-        if ($isPermissionError) {
-            throw "Failed to symlink an adopted Unity Hub instance into '$statusDir': $($_.Exception.Message). Creating a symbolic link on Windows requires Developer Mode (Settings > Update & Security > For developers > Developer Mode) or Administrator privileges - enable one of these and retry."
-        }
-        throw "Failed to symlink an adopted Unity Hub instance into '$statusDir': $($_.Exception.Message)"
-    }
-    Write-Host "Adopted a Hub-started Unity editor for this checkout -> $statusDir"
-}
-
-function Get-UnityMcpLaunchDecision {
-    # 'already-connected' when a live status file (real or a freshly-adopted
-    # link) passes the same heartbeat/port checks; otherwise 'launch'. By the
-    # time this runs the preamble has already deleted dangling/stale links,
-    # so "dangling" and "nothing present" are the same input here.
-    param(
-        [Parameter(Mandatory)][string]$StatusDir,
-        [int]$HeartbeatMaxAgeSeconds = $HeartbeatMaxAgeSeconds,
-        [int]$PortProbeTimeoutMs = $PortProbeTimeoutMs
-    )
-    if (-not (Test-Path -LiteralPath $StatusDir)) { return 'launch' }
-    $statusFiles = Get-ChildItem -LiteralPath $StatusDir -Force -Filter 'unity-mcp-status-*.json' -ErrorAction SilentlyContinue
-    foreach ($sf in $statusFiles) {
-        if (Test-StatusFileLive -StatusFilePath $sf.FullName -HeartbeatMaxAgeSeconds $HeartbeatMaxAgeSeconds -PortProbeTimeoutMs $PortProbeTimeoutMs) {
-            return 'already-connected'
-        }
-    }
-    return 'launch'
-}
+# Unity Hub adoption (ticket #52) - Test-TcpPortOpen, Get-ComparablePath,
+# Test-StatusFileLive, Find-AdoptionCandidate, Sync-AdoptedCopies,
+# Invoke-UnityMcpAdoption, Get-UnityMcpLaunchDecision all come from here.
+. (Join-Path $PSScriptRoot 'unity-mcp-adopt.ps1')
 
 function Test-ShouldSkipLibraryMirror {
     # Ticket #47 / Finding stays fixed: the pre-existing IsNullOrEmpty/Test-Path
@@ -611,21 +336,29 @@ function Start-UnityEditor {
 }
 
 function Invoke-UnityMcpLauncherFlow {
-    # Full launch flow (both the managed start: steps and a bare invocation
-    # without -AdoptOnly use this): adopt, decide, and launch only if needed.
-    # -Variant is declared explicitly (review round 1 nit) rather than relying
-    # on implicit PowerShell scope chaining up to the top-level param() block.
+    # Full launch flow (the managed start: steps use this): adopt, decide,
+    # and launch only if needed. -Variant is declared explicitly (review
+    # round 1 nit) rather than relying on implicit PowerShell scope chaining
+    # up to the top-level param() block.
     param(
         [Parameter(Mandatory)][string]$CheckoutPath,
         [Parameter(Mandatory)][string]$GlobalStatusDir,
         [ValidateSet('default', 'gui')][string]$Variant = 'default'
     )
+    # Diagnostics for any rejected candidate are deliberately NOT suppressed
+    # here - they flow through to this launcher's own stdout too, so a human
+    # watching environment_start's launch output sees the same rejection
+    # reasons the PreToolUse hook would print (ticket #52 / R9).
     Invoke-UnityMcpAdoption -CheckoutPath $CheckoutPath -GlobalStatusDir $GlobalStatusDir
     $statusDir = Join-Path $CheckoutPath '.unity-mcp'
     $decision = Get-UnityMcpLaunchDecision -StatusDir $statusDir
     if ($decision -eq 'already-connected') {
-        $realFile = Get-ChildItem -LiteralPath $statusDir -Force -Filter 'unity-mcp-status-*.json' -ErrorAction SilentlyContinue |
-            Where-Object { -not (Test-EntryIsLink -Entry $_) } |
+        # Ticket #52: adoption is a COPY, not a symlink - self-identified by
+        # filename (unity-mcp-status-adopted-*.json) rather than
+        # Test-EntryIsLink/reparse-point inspection (that whole apparatus is
+        # gone; see scripts/unity-mcp-adopt.ps1).
+        $realFile = Get-ChildItem -LiteralPath $statusDir -Force -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^unity-mcp-.*status.*\.json$' -and $_.Name -notmatch '^unity-mcp-status-adopted-' } |
             Select-Object -First 1
         if ($realFile) {
             Write-Host "Unity bridge already running for this checkout (this session's own prior instance) -> $statusDir"
@@ -666,11 +399,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             $CheckoutPath = Join-Path -Path (Get-Location).Path -ChildPath $CheckoutPath
         }
     }
-    if ($AdoptOnly) {
-        Invoke-UnityMcpAdoption -CheckoutPath $CheckoutPath -GlobalStatusDir $GlobalStatusDir
-    } else {
-        Invoke-UnityMcpLauncherFlow -CheckoutPath $CheckoutPath -GlobalStatusDir $GlobalStatusDir -Variant $Variant
-    }
+    Invoke-UnityMcpLauncherFlow -CheckoutPath $CheckoutPath -GlobalStatusDir $GlobalStatusDir -Variant $Variant
 }
 # <<< agent-unity-wrapper generated
 '@
@@ -744,10 +473,30 @@ if ($gi -match '(?m)^\s*/?\.unity-mcp/?\s*$') {
     Write-Info "Added $ignoreLine to .gitignore."
 }
 
-# --- 4. .seretos/unity-mcp-launch.ps1 (ticket #47 - always regenerated) -----
+# --- 4. .seretos/unity-mcp-adopt.ps1 (ticket #52 - always regenerated) ------
+# A verbatim copy of scripts/unity-mcp-adopt.ps1 (the authoritative,
+# plugin-owned implementation) - read from $PSScriptRoot so this works
+# regardless of how the plugin is invoked. Same always-overwritten ownership
+# model as unity-mcp-launch.ps1 below: environment_start's launcher runs
+# inside the target repo with no ${CLAUDE_PLUGIN_ROOT} and no plugin path at
+# all, so this mirror is the only way its preamble can dot-source the exact
+# same adoption logic the PreToolUse hook runs directly via
+# ${CLAUDE_PLUGIN_ROOT}/scripts/unity-mcp-adopt.ps1. It is a generated mirror
+# of one source file, never an editable second implementation.
+$adoptScriptSource = Join-Path $PSScriptRoot 'unity-mcp-adopt.ps1'
+$adoptScriptDest   = Join-Path $RepoRoot '.seretos/unity-mcp-adopt.ps1'
+if (Test-Path -LiteralPath $adoptScriptSource) {
+    $adoptScriptContent = Get-Content -LiteralPath $adoptScriptSource -Raw
+    Write-Utf8NoBom -Path $adoptScriptDest -Content $adoptScriptContent
+    Write-Info "Wrote .seretos/unity-mcp-adopt.ps1 (always regenerated)."
+} else {
+    Write-Warn2 "scripts/unity-mcp-adopt.ps1 not found next to this script - skipping .seretos/unity-mcp-adopt.ps1 materialization."
+}
+
+# --- 5. .seretos/unity-mcp-launch.ps1 (ticket #47 - always regenerated) -----
 # Unlike .seretos/worktree-setup.yml above, this file is owned outright by
 # this plugin: it is written on every run, with no -Force gate and no
-# existence check, so an update to the launch/adoption logic reaches every
+# existence check, so an update to the launch logic reaches every
 # already-prepared repo the next time this script runs. Never added to
 # .gitignore - it is tracked repo content, matching $managedBlock's model.
 $launchScriptPath = Join-Path $RepoRoot '.seretos/unity-mcp-launch.ps1'

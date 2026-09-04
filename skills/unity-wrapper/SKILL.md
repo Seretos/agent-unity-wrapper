@@ -272,40 +272,63 @@ worktree (`${CLAUDE_PROJECT_DIR}` = the worktree root) — both cases resolve to
 ### Unity Hub adoption
 
 A Unity Editor a human started directly through **Unity Hub** — not via `environment_start`
-— writes its status/port files into the **global** `~/.unity-mcp` directory (see Pitfall 5),
-not the checkout-local one, so this session's MCP server would normally find no instance.
-**Adoption** closes that gap: it symlinks the matching Hub instance's
-`unity-mcp-status-*.json` and `unity-mcp-port-*.json` files into `<checkout>/.unity-mcp`,
+— writes its status file into the **global** `~/.unity-mcp` directory (see Pitfall 5), not
+the checkout-local one, so this session's MCP server would normally find no instance.
+**Adoption** closes that gap by **copying** the matching Hub instance's
+`unity-mcp-status-*.json` into `<checkout>/.unity-mcp/unity-mcp-status-adopted-<suffix>.json`,
 so the same status-dir isolation contract above picks it up with no manual "select
-instance" step and no separate marker file — a symlink is self-identifying. A match
-requires the Hub instance's `project_path` to resolve to `<checkout>/Assets`, a heartbeat
-no older than 60 s, and a successful TCP connect to its reported port within 500 ms; a
-stale or dangling adopted link is cleaned up unconditionally before every adoption pass,
-whether or not a new candidate is found.
+instance" step. The copy is identified purely by its filename prefix
+(`unity-mcp-status-adopted-`) — no JSON field, no reparse point, no Developer Mode or
+Administrator privilege required on Windows, unlike the link-based design this replaced.
 
-Adoption is reached from **two** entry points, both running the same logic generated into
-`<checkout>/.seretos/unity-mcp-launch.ps1` by `scripts/prepare-unity-worktree.ps1`:
+A match requires the Hub instance's `project_path` to resolve to `<checkout>/Assets` —
+compared via a **normalized** key (absolutized, separators unified, trailing slash
+trimmed, case-insensitive on Windows) rather than literal string equality, so a
+forward-slash/backslash or drive-letter-casing difference between what Unity wrote and
+what this session sees still matches — and a successful TCP connect to its reported port
+within 500 ms. There is **no heartbeat-age gate**: liveness is the TCP probe alone,
+re-run on every pass, which is both fresher and stricter evidence than a timestamp an
+editor busy in a long import/compile might simply have stopped refreshing. A stale
+adopted copy (its port no longer answers) is deleted; a live one survives even on a run
+that cannot re-find its source; an existing adopted copy is overwritten with fresh
+content whenever a live source is re-found.
 
-- **Claude Code — automatic, no agent action.** A `SessionStart` hook
-  (`hooks/hooks.json` → `hooks/session-start-adopt.ps1`) runs the adoption pass at the
-  start of every session, before any tool call. It exits silently on a project that has
-  not been prepared for the Unity MCP bridge, so a non-Unity project sees no hook noise.
+**Reached from two callers, one implementation: `scripts/unity-mcp-adopt.ps1`.** This is a
+real, plugin-owned script (not a here-string generated into `.seretos/`) that needs no
+prepare-script precondition at all to run.
+
+- **Claude Code — automatic, before every Unity MCP tool call.** A `PreToolUse` hook
+  (`hooks/hooks.json`, matcher `mcp__.*unityMCP__.*`) runs
+  `${CLAUDE_PLUGIN_ROOT}/scripts/unity-mcp-adopt.ps1` immediately before each unityMCP tool
+  invocation — **not** the old `SessionStart` design, which could only adopt once at the
+  start of a session and never noticed an editor started (or restarted) mid-session.
+  `PreToolUse` timing catches exactly that case: restart the Hub editor mid-session, issue
+  the next Unity tool call, and it is re-adopted before the call runs.
 - **Both hosts — via the launcher.** `environment_start`'s own `default`/`gui` steps run
-  the identical adoption pass as their preamble before deciding whether to launch a new
-  Unity process at all (already-connected to an adopted or prior instance → no launch).
+  the identical adoption pass as their preamble (the generated
+  `.seretos/unity-mcp-launch.ps1` dot-sources a materialized copy of the same script,
+  `.seretos/unity-mcp-adopt.ps1`) before deciding whether to launch a new Unity process at
+  all (already-connected to an adopted or prior instance → no launch).
 
-**Codex has no hook surface — this is Claude Code only for automatic discovery.** A Codex
-session never gets the SessionStart pass, so on Codex a Hub-started editor is discovered
-only when `environment_start` next runs (its launcher-preamble path above still adopts it
-before deciding to launch), or by running `.seretos/unity-mcp-launch.ps1 -AdoptOnly
--CheckoutPath <path>` by hand. Do not assume Codex gets the same "found with no agent
-action" guarantee that Claude Code's hook provides.
+**Codex has no hook surface.** A Codex session never gets the automatic `PreToolUse` pass,
+so on Codex a Hub-started editor is discovered only when `environment_start` next runs
+(its launcher-preamble path above still adopts it before deciding to launch), or by
+running `scripts/unity-mcp-adopt.ps1 -CheckoutPath <path>` by hand. Do not assume Codex
+gets the same "found with no agent action" guarantee that Claude Code's hook provides.
 
-**Creating the symlink requires privilege on Windows.** If the account running the session
-lacks Developer Mode or Administrator rights, symlink creation fails and adoption fails
-loudly with a message naming the exact remedy (enable Developer Mode, or run elevated) —
-it does not silently fall back to copying the status file (a copied heartbeat would go
-stale without ever being refreshed by the adopted instance).
+**The script always exits 0**, even on an internal failure (it prints one
+`unity-mcp-adopt:`-prefixed diagnostic line and continues) — a `PreToolUse` hook must
+never block the tool call it runs ahead of. Rejected candidates (mismatched path, closed
+port, unreadable JSON) are similarly explained on stdout rather than failing the run, one
+line per candidate, naming both the rejection reason and — for a path mismatch — both
+normalized keys, so a residual 8.3/junction/`subst` path difference is diagnosable from a
+real run's output instead of silently producing no adoption.
+
+**An unprepared repo may want `.unity-mcp/` in its own `.gitignore`** — adoption creates
+that directory the first time it actually has something to copy, and
+`scripts/prepare-unity-worktree.ps1` only adds that ignore entry as part of full
+preparation (see "When to boot" above); a repo that only ever relies on Hub adoption and
+never runs the prepare-script should add the entry itself.
 
 ### Version-pin strategy
 
@@ -745,8 +768,9 @@ branch switches, see the Cache Server section above.
    wrong directory. Two fixes: stop the raw editor and restart it via `environment_start`
    (`checkout_path=<repo root>` for the main checkout, `environment_id=<id>` for a linked
    worktree); or, for a Unity Hub-started editor specifically, run **Unity Hub adoption**
-   (below) instead of restarting it — a fresh Claude Code session does this automatically,
-   and `environment_start` itself runs the same adoption pass before deciding whether to
+   (below) instead of restarting it — Claude Code does this automatically before the very
+   next Unity tool call (a `PreToolUse` hook, no privilege required), and
+   `environment_start` itself runs the same adoption pass before deciding whether to
    launch a new process.
 
 6. **Test Runner can freeze the editor.**

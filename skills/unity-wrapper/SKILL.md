@@ -1,6 +1,6 @@
 ---
 name: unity-wrapper
-description: Drive the Unity editor through the external Unity MCP server (server key unityMCP) — inspect and edit scenes, GameObjects, components and assets, enter and exit Play mode, capture screenshots, run Unity Test Runner tests (run_tests, EditMode and PlayMode), and read the Unity console for compilation errors after a script write, instead of guessing project state. Also covers booting a per-worktree Unity editor with environment_start (headless vs GUI variants, UNITY_MCP_STATUS_DIR isolation), cold-start Library re-import expectations and acceleration, standalone builds, and recovering when a tool call reports no Unity Editor instances or Unity refuses to open a project because of a stale Temp/UnityLockfile. Use when working inside a Unity project, starting or connecting to a Unity editor, or when a Unity MCP tool call fails.
+description: Drive the Unity editor through the external Unity MCP server (server key unityMCP) — inspect and edit scenes, GameObjects, components and assets, enter and exit Play mode, capture screenshots, run Unity Test Runner tests (run_tests, EditMode and PlayMode), and read the Unity console for compilation errors after a script write, instead of guessing project state. Also covers booting a per-worktree Unity editor with environment_start (headless vs GUI variants, UNITY_MCP_STATUS_DIR isolation), cold-start Library re-import expectations and acceleration, standalone builds, and recovering when a tool call reports no Unity Editor instances or Unity refuses to open a project because of a stale Temp/UnityLockfile. Also covers running a project's own [McpForUnityTool] custom tools (execute_custom_tool), even when the custom-tools list is empty. Use when working in a Unity project, starting or connecting to a Unity editor, running a project's custom Unity tool, or when a Unity MCP tool call fails or a tool is missing.
 ---
 
 # unity-wrapper
@@ -53,10 +53,16 @@ Key entities the MCP exposes:
 ## Tool inventory
 
 The tools below are exposed by the Unity MCP server (MCP server key: `unityMCP`).
-These are the **real MCP tool identifiers** — call them by these names. They were read
-from the `mcpforunityserver` package source (9.7.3); the manifests currently pin
-`mcpforunityserver==9.7.1`, so if a name is rejected, list the live surface with
-`manage_tools` or read the `mcpforunity://tool-groups` resource rather than guessing.
+These are the **real MCP tool identifiers** — call them by these names.
+
+**Which server you are talking to:** both manifests launch `mcpforunityserver==9.7.1` with
+`--transport stdio`, so a session using this plugin runs version 9.7.1 over `stdio`. You
+do not need to confirm this per session; it changes only if someone replaced the
+plugin's `unityMCP` server configuration. The names in the table were checked against
+the package source of a later release (9.7.3), not against 9.7.1 itself. That is the
+only reason 9.7.3 appears here: if 9.7.1 rejects one of these built-in names, list the
+live surface with `manage_tools` or read the `mcpforunity://tool-groups` resource rather
+than guessing.
 
 **Reads are resources, writes are tools.** Several read paths are MCP *resources*
 (`mcpforunity://…`), not tools — most importantly component reads, which have no tool.
@@ -64,9 +70,11 @@ from the `mcpforunityserver` package source (9.7.3); the manifests currently pin
 **Tools are grouped, and groups can be off.** Group `core` is always on. `execute_code`
 is in `scripting_ext`; `run_tests` and `get_test_job` are in `testing`; `manage_tools`
 and `set_active_instance` are always visible. Over stdio all groups start enabled and
-then sync with Unity's own tool states — so a tool that is *missing from the list* is a
-disabled group (fix with `manage_tools`), which is a different failure from a tool that
-is listed but *fails to call* (bridge unreachable — see Pitfall 1).
+then sync with Unity's own tool states — so a **built-in** tool that is *missing from the
+list* is a disabled group (fix with `manage_tools`), which is a different failure from a
+tool that is listed but *fails to call* (bridge unreachable — see Pitfall 1). A project's
+own `[McpForUnityTool]` tool is not in any group; if one is missing, `manage_tools` cannot
+show or enable it — use the recipe "Run a project's own editor tool ([McpForUnityTool])".
 
 | Tool | What it is best for |
 |---|---|
@@ -172,18 +180,29 @@ behaviour carries over to them.
    project state in ways only that project's code defines. Do not make exploratory runs or
    runs with placeholder arguments to see what happens. Save or record the relevant state
    before the call (for example `manage_scene action=save`), and check the result after it.
-5. **If the list is empty:** this is expected over `stdio` with `mcpforunityserver==9.7.1` —
-   the server fills this resource only on its HTTP/WebSocket transports. It is not an
-   editor-connection or timing problem, so do not restart Unity, the server or the session
-   to fill it, and do not wait and re-read. Instead:
-   - Look in the `unityMCP` tool list for the project tool under its own name — over
-     `stdio` the server registers each project tool as a separate MCP tool. If it is there,
-     call it directly by that name, with the same caution as step 4.
+5. **If the list is empty (or lacks the tool you want):** with this plugin's server
+   (9.7.1 over `stdio`, see "Which server you are talking to" above) an empty list is the
+   normal result — the server fills this resource only on its HTTP/WebSocket transports.
+   It is not an editor-connection or timing problem, however much it looks like one, and
+   how long the editor has been connected does not matter. If built-in calls such as
+   reading `mcpforunity://editor/state` succeed, the bridge is up and the empty list says
+   nothing about the connection. Do not restart Unity, the server or the session to fill
+   it, and do not wait and re-read. Instead:
+   - Look in the `unityMCP` tool list for the project tool under its own name. Over
+     `stdio` the server registers each project tool as a separate MCP tool, next to the
+     built-in ones. The `unityMCP` tool list is the set of tools your host offers you from
+     that server — in Claude Code their names have the form `mcp__…unityMCP__<tool name>`.
+     Not `manage_tools`: that lists built-in groups only.
+   - If it is there, call it directly by that name. Its parameters are the input schema
+     of that tool itself. Take the argument values from the task; if the task does not
+     give a required value, ask for it instead of filling in a placeholder. Apply the same
+     caution as step 4.
    - Never pass a name to `execute_custom_tool` that `mcpforunity://custom-tools` did not
-     list.
+     list — not even once to see what happens, and not because the name appears in the
+     project's code. `execute_custom_tool` is only for listed names.
    - If the tool is in neither place, stop and report it as unreachable, stating both
      checks: `mcpforunity://custom-tools` returned no matching entry, and the `unityMCP`
-     tool list has no tool by that name.
+     tool list has no tool by that name. Say that the tool was not run.
 
 ### Capture a screenshot from Play mode
 

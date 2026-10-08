@@ -17,7 +17,8 @@
         "mcpforunityserver==9.7.1",
         "mcp-for-unity",
         "--transport",
-        "stdio"
+        "stdio",
+        "--project-scoped-tools"
       ],
       "env": {
         "UNITY_MCP_STATUS_DIR": ".unity-mcp"

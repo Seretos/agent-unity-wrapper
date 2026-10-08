@@ -29,6 +29,16 @@ Describe 'plugin manifests - unityMCP args (ticket #59 / R1)' {
             @($args_ | Where-Object { $_ -eq '--project-scoped-tools' }).Count | Should Be 1
         }
 
+        # Placed before the entry-point arg, uvx would consume the flag as its
+        # own option and the server would never see it.
+        It "$name manifest passes --project-scoped-tools after the mcp-for-unity entry point" {
+            $args_ = @((Get-MmaManifestServer $path).args)
+            $entry = [array]::IndexOf($args_, 'mcp-for-unity')
+            $flag = [array]::IndexOf($args_, '--project-scoped-tools')
+            ($entry -ge 0) | Should Be $true
+            ($flag -gt $entry) | Should Be $true
+        }
+
         It "$name manifest keeps --transport stdio adjacent" {
             $args_ = @((Get-MmaManifestServer $path).args)
             $i = [array]::IndexOf($args_, '--transport')

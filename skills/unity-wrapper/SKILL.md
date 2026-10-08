@@ -90,11 +90,20 @@ is listed but *fails to call* (bridge unreachable — see Pitfall 1).
 | `batch_execute` | Bundling several MCP commands into one round-trip — strongly preferred for repetitive edits |
 | `manage_tools` | Listing tool groups and enabling/disabling them. Always visible; reach for it when an expected tool is absent |
 | `set_active_instance` | Selecting among multiple discovered Unity instances — normally unnecessary here (status-dir isolation guarantees exactly one) |
+| `mcpforunity://custom-tools` | The project's own registered `[McpForUnityTool]` editor tools, each with its name and parameters (a resource, not a tool). Read it before `execute_custom_tool` |
+| `execute_custom_tool` | Runs one of the project's own tools: `execute_custom_tool(tool_name=<name from mcpforunity://custom-tools>, parameters=<object>)`. Destructive and project-specific |
+
+`mcpforunity://custom-tools` and `execute_custom_tool` exist only because both manifests
+pass `--project-scoped-tools` to the server (ticket #59). Use them through the recipe
+"Run a project's own editor tool ([McpForUnityTool])" below, never by guessing a name.
 
 Further groups exist for domain work — `vfx` (`manage_vfx`, `manage_shader`, `manage_texture`),
 `ui` (`manage_ui`), `animation` (`manage_animation`), `docs` (`unity_docs`, `unity_reflect`),
 `probuilder`, `profiling` — plus `manage_material`, `manage_graphics`, `manage_physics`,
-`manage_packages`, `manage_scriptable_object`. Enumerate the live set with `manage_tools`.
+`manage_packages`, `manage_scriptable_object`. `manage_tools` lists and toggles these
+built-in groups only; it does not list a project's own `[McpForUnityTool]` tools, and a
+missing project tool is not a disabled group. Reach a project's own tools through the
+recipe below.
 
 ## Patterns and recipes
 
@@ -146,6 +155,35 @@ result. See "Capture a screenshot from Play mode" below.
    editor has transitioned.
 3. Perform any play-mode-specific queries (e.g. reading runtime component values).
 4. Use `manage_editor action=stop` to exit Play mode before making any scene edits.
+
+### Run a project's own editor tool ([McpForUnityTool])
+
+A Unity project can define its own editor tools with the `[McpForUnityTool]` attribute.
+They are not part of the built-in inventory above, and nothing about a built-in tool's
+behaviour carries over to them.
+
+1. Read `mcpforunity://custom-tools`. It lists the project's registered tools with their
+   names and parameters.
+2. Pick the tool by the name exactly as listed. Never infer or construct a name from what
+   the tool is supposed to do.
+3. Call `execute_custom_tool(tool_name=<listed name>, parameters=<object matching the
+   listed parameters>)`.
+4. Treat the call as destructive and project-specific: it can change the scene, assets or
+   project state in ways only that project's code defines. Do not make exploratory runs or
+   runs with placeholder arguments to see what happens. Save or record the relevant state
+   before the call (for example `manage_scene action=save`), and check the result after it.
+5. **If the list is empty:** this is expected over `stdio` with `mcpforunityserver==9.7.1` —
+   the server fills this resource only on its HTTP/WebSocket transports. It is not an
+   editor-connection or timing problem, so do not restart Unity, the server or the session
+   to fill it, and do not wait and re-read. Instead:
+   - Look in the `unityMCP` tool list for the project tool under its own name — over
+     `stdio` the server registers each project tool as a separate MCP tool. If it is there,
+     call it directly by that name, with the same caution as step 4.
+   - Never pass a name to `execute_custom_tool` that `mcpforunity://custom-tools` did not
+     list.
+   - If the tool is in neither place, stop and report it as unreachable, stating both
+     checks: `mcpforunity://custom-tools` returned no matching entry, and the `unityMCP`
+     tool list has no tool by that name.
 
 ### Capture a screenshot from Play mode
 
@@ -736,8 +774,10 @@ branch switches, see the Cache Server section above.
    - **No session restart, no host reconnect, no re-adding the MCP server.** A Unity that
      dropped and came back is picked up the same way — the upstream `refresh_unity` tool
      reports `recovered_from_disconnect: true` in that case.
-   The tool list is a **static** server-side definition: `unityMCP`'s tools appear whether
-   or not Unity is reachable. Seeing the tools does not mean the bridge is up, and a
+   The built-in tool list is a **static** server-side definition: `unityMCP`'s built-in
+   tools appear whether or not Unity is reachable. The exception is a project's own
+   `[McpForUnityTool]` tools registered under their own names, which come from Unity (see
+   "Run a project's own editor tool ([McpForUnityTool])"). Seeing the tools does not mean the bridge is up, and a
    failing call does not mean the tool is missing — it means the bridge is unreachable
    *right now*. The one thing that genuinely cannot be fixed by retrying is a status-dir
    mismatch — see "Status-dir isolation contract" and Pitfall 5.

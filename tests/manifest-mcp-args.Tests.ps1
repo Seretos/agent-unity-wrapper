@@ -60,7 +60,9 @@ Describe 'plugin manifests - unityMCP args (ticket #59 / R1)' {
 
         It "$name manifest keeps the mcpforunityserver==10.3.0 pin" {
             $args_ = @((Get-MmaManifestServer $path).args)
-            ($args_ -contains 'mcpforunityserver==10.3.0') | Should Be $true
+            $from = [array]::IndexOf($args_, '--from')
+            ($from -ge 0) | Should Be $true
+            $args_[$from + 1] | Should Be 'mcpforunityserver==10.3.0'
         }
     }
 }

@@ -1,7 +1,7 @@
 # Upstream issue (ready to file): `port_discovery.list_candidate_files` throws on a dangling symlink
 
 **Target repo:** `CoplayDev/unity-mcp` (the vendored `mcpforunityserver` Python package this
-plugin wraps; server key `unityMCP`, currently pinned `mcpforunityserver==9.7.1`).
+plugin wraps; server key `unityMCP`, currently pinned `mcpforunityserver==10.3.0`).
 
 **Component:** `port_discovery.py`, function `list_candidate_files` (the routine that scans
 a status directory for `unity-mcp-status-*.json` / `unity-mcp-port-*.json` candidates and

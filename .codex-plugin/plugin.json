@@ -14,7 +14,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "mcpforunityserver==9.7.1",
+        "mcpforunityserver==10.3.0",
         "mcp-for-unity",
         "--transport",
         "stdio",

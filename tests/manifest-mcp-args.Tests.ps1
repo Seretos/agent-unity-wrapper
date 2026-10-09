@@ -11,7 +11,7 @@
 # [McpForUnityTool] tool, run:
 #   $env:UNITY_WRAPPER_LIVE_EDITOR_CHECKOUT='<abs path of the checkout>'
 #   $env:UNITY_WRAPPER_LIVE_CUSTOM_TOOL='<tool name, e.g. world_describe>'
-#   Invoke-Pester .	ests\manifest-mcp-args.Tests.ps1
+#   Invoke-Pester .\tests\manifest-mcp-args.Tests.ps1
 # It asserts tool reachability only (execute_custom_tool returns the tool's
 # real result, and the tool's own name is in tools/list). It deliberately does
 # NOT assert tool_count > 0 on mcpforunity://custom-tools: under stdio that

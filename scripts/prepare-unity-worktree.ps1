@@ -61,7 +61,7 @@
   directory.
 
 .PARAMETER UnityMcpVersion
-  Version tag for the bridge package / status-dir contract. Defaults to 9.7.1 to match
+  Version tag for the bridge package / status-dir contract. Defaults to 10.3.0 to match
   the MCP server pin in the plugin manifests.
 
 .PARAMETER Force
@@ -79,7 +79,7 @@
 [CmdletBinding()]
 param(
     [string]$RepoRoot,
-    [string]$UnityMcpVersion = '9.7.1',
+    [string]$UnityMcpVersion = '10.3.0',
     [switch]$Force
 )
 

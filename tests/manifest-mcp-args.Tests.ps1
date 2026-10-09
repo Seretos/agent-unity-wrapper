@@ -172,6 +172,24 @@ function Invoke-MmaLiveMcp {
     }
 }
 
+function Get-MmaInstalledServerVersion {
+    param([string]$Pin, [int]$TimeoutSeconds = 180)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = (Get-Command uvx).Source
+    $psi.Arguments = '--from ' + $Pin + ' python -c "from importlib.metadata import version; print(version(''mcpforunityserver''))"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    try {
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $null = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch {}; throw "uvx version probe timed out for $Pin" }
+        return $out.Result.Trim()
+    }
+    finally { if (-not $p.HasExited) { try { $p.Kill() } catch {} } }
+}
+
 Describe 'unityMCP server started from the manifest exposes project-scoped tools (ticket #59 / R2, live, opt-in)' {
 
     foreach ($mf in $global:mma_manifests) {
@@ -189,6 +207,16 @@ Describe 'unityMCP server started from the manifest exposes project-scoped tools
             ($toolNames -contains 'execute_custom_tool') | Should Be $true
             $uris = @($r[3].result.resources | ForEach-Object { $_.uri })
             ($uris -contains 'mcpforunity://custom-tools') | Should Be $true
+
+            # Ticket #64: the manifest's --from pin must be what that launch
+            # actually installs (manifest pin == installed version; holds for
+            # any pin, not tied to the script default).
+            $srv = Get-MmaManifestServer $path
+            $srvArgs = @($srv.args)
+            $pin = [string]$srvArgs[[array]::IndexOf($srvArgs, '--from') + 1]
+            $pin | Should Match '^mcpforunityserver==\d+\.\d+\.\d+$'
+            $installed = Get-MmaInstalledServerVersion -Pin $pin
+            $installed | Should Be ($pin -replace '^mcpforunityserver==', '')
         }
     }
 }

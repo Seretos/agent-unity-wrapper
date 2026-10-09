@@ -30,6 +30,13 @@ function Get-MmaManifestServer {
     return $m.mcpServers.unityMCP
 }
 
+function Get-MmaScriptPinVersion {
+    $script = Join-Path $global:mma_repoRoot 'scripts\prepare-unity-worktree.ps1'
+    $m = [regex]::Match((Get-Content -LiteralPath $script -Raw), "\[string\]\`$UnityMcpVersion\s*=\s*'([^']+)'")
+    if (-not $m.Success) { throw 'UnityMcpVersion default not found in prepare-unity-worktree.ps1' }
+    return $m.Groups[1].Value
+}
+
 Describe 'plugin manifests - unityMCP args (ticket #59 / R1)' {
 
     foreach ($mf in $global:mma_manifests) {
@@ -58,12 +65,23 @@ Describe 'plugin manifests - unityMCP args (ticket #59 / R1)' {
             $args_[$i + 1] | Should Be 'stdio'
         }
 
-        It "$name manifest keeps the mcpforunityserver==10.3.0 pin" {
+        # Single source of truth: the -UnityMcpVersion default of the prepare
+        # script. Manifests (server pin) and the bridge default must agree.
+        It "$name manifest pin equals the prepare script's UnityMcpVersion default" {
             $args_ = @((Get-MmaManifestServer $path).args)
             $from = [array]::IndexOf($args_, '--from')
             ($from -ge 0) | Should Be $true
-            $args_[$from + 1] | Should Be 'mcpforunityserver==10.3.0'
+            $args_[$from + 1] | Should Be ('mcpforunityserver==' + (Get-MmaScriptPinVersion))
         }
+    }
+}
+
+Describe 'unity-mcp pin source of truth (ticket #64 / R1)' {
+    It 'prepare-unity-worktree.ps1 -UnityMcpVersion default is a 10.x version' {
+        (Get-MmaScriptPinVersion) | Should Match '^10\.\d+\.\d+$'
+    }
+    It 'prepare-unity-worktree.ps1 -UnityMcpVersion default is 10.3.0' {
+        (Get-MmaScriptPinVersion) | Should Be '10.3.0'
     }
 }
 
@@ -162,8 +180,11 @@ Describe 'unityMCP server started from the manifest exposes project-scoped tools
 
         It -Skip:$global:mma_skipLive "$name manifest: tools/list has execute_custom_tool and resources/list has mcpforunity://custom-tools" {
             $r = Invoke-MmaLiveMcp -ManifestPath $path
+            $r.ContainsKey(1) | Should Be $true
             $r.ContainsKey(2) | Should Be $true
             $r.ContainsKey(3) | Should Be $true
+            # A real launch of the pinned server answers initialize with a serverInfo.
+            [string]$r[1].result.serverInfo.name | Should Not BeNullOrEmpty
             $toolNames = @($r[2].result.tools | ForEach-Object { $_.name })
             ($toolNames -contains 'execute_custom_tool') | Should Be $true
             $uris = @($r[3].result.resources | ForEach-Object { $_.uri })

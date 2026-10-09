@@ -97,7 +97,7 @@ function New-LocalStatusFile {
     )
     New-Item -ItemType Directory -Force -Path $StatusDir | Out-Null
     $heartbeat = (Get-Date).ToUniversalTime().AddSeconds(-$HeartbeatAgeSeconds).ToString('o')
-    # Field names verified against the real mcpforunityserver==9.7.1 wheel
+    # Field names verified against the real mcpforunityserver==10.3.0 wheel (source at tag v10.3.0)
     # (review round 3): unity_port / last_heartbeat, not port / heartbeat -
     # see scripts\prepare-unity-worktree.ps1's Get-StatusFileHeartbeatAgeSeconds
     # header comment for the exact upstream source lines.
@@ -258,7 +258,7 @@ Describe 'prepare-unity-worktree.ps1 — Packages/manifest.json handling' {
             Write-Utf8NoBom -Path $mp -Content '{"dependencies":{}}'
             & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
             $obj = Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
-            $obj.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v9\.7\.1'
+            $obj.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v10\.3\.0'
         } finally { Remove-TempUnityRepo $tmp }
     }
 
@@ -267,7 +267,7 @@ Describe 'prepare-unity-worktree.ps1 — Packages/manifest.json handling' {
         try {
             New-Item -ItemType Directory -Path (Join-Path $tmp 'Packages') | Out-Null
             $mp  = Join-Path $tmp 'Packages\manifest.json'
-            $url = 'https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#v9.7.1'
+            $url = 'https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#v10.3.0'
             Write-Utf8NoBom -Path $mp -Content "{`"dependencies`":{`"com.coplaydev.unity-mcp`":`"$url`"}}"
             & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
             (Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json).dependencies.'com.coplaydev.unity-mcp' | Should Be $url
@@ -291,7 +291,7 @@ Describe 'prepare-unity-worktree.ps1 — Packages/manifest.json handling' {
             $reparsed = Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
 
             # com.coplaydev.unity-mcp must be updated to the correct pin.
-            $reparsed.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v9\.7\.1'
+            $reparsed.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v10\.3\.0'
 
             # All other packages must be present and untouched.
             $reparsed.dependencies.'com.unity.modules.ai'  | Should Be '1.0.0'
@@ -310,7 +310,7 @@ Describe 'prepare-unity-worktree.ps1 — Packages/manifest.json handling' {
             & $global:puw_scriptPath -RepoRoot $tmp -WarningVariable wv 2>&1 | Out-Null
             $warnText = ($wv | Out-String)
             ($warnText -match 'main') | Should Be $true
-            ($warnText -match 'v9\.7\.1') | Should Be $true
+            ($warnText -match 'v10\.3\.0') | Should Be $true
         } finally { Remove-TempUnityRepo $tmp }
     }
 }
@@ -593,7 +593,7 @@ Describe 'prepare-unity-worktree.ps1 — idempotency and -Force behaviour' {
             & $global:puw_scriptPath -RepoRoot $tmp | Out-Null
 
             $obj = Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
-            $obj.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v9\.7\.1'
+            $obj.dependencies.'com.coplaydev.unity-mcp' | Should Match '#v10\.3\.0'
 
             $giPath = Join-Path $tmp '.gitignore'
             Test-Path $giPath | Should Be $true

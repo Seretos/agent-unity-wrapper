@@ -5,6 +5,18 @@
 # Pester 3.x. Static Describe always runs; the live Describe is opt-in:
 #   $env:UNITY_WRAPPER_LIVE_MCP='1'; Invoke-Pester .\tests\manifest-mcp-args.Tests.ps1
 # (needs uvx on PATH and network for the first download).
+#
+# Ticket #64 - live-editor check (opt-in): with a Unity editor already running
+# for a checkout via environment_start, and that project defining a
+# [McpForUnityTool] tool, run:
+#   $env:UNITY_WRAPPER_LIVE_EDITOR_CHECKOUT='<abs path of the checkout>'
+#   $env:UNITY_WRAPPER_LIVE_CUSTOM_TOOL='<tool name, e.g. world_describe>'
+#   Invoke-Pester .	ests\manifest-mcp-args.Tests.ps1
+# It asserts tool reachability only (execute_custom_tool returns the tool's
+# real result, and the tool's own name is in tools/list). It deliberately does
+# NOT assert tool_count > 0 on mcpforunity://custom-tools: under stdio that
+# resource may stay empty, because each project tool is registered as its own
+# named MCP tool instead.
 
 $global:mma_repoRoot = Split-Path -Parent $PSScriptRoot
 $global:mma_manifests = @(
@@ -46,9 +58,9 @@ Describe 'plugin manifests - unityMCP args (ticket #59 / R1)' {
             $args_[$i + 1] | Should Be 'stdio'
         }
 
-        It "$name manifest keeps the mcpforunityserver==9.7.1 pin" {
+        It "$name manifest keeps the mcpforunityserver==10.3.0 pin" {
             $args_ = @((Get-MmaManifestServer $path).args)
-            ($args_ -contains 'mcpforunityserver==9.7.1') | Should Be $true
+            ($args_ -contains 'mcpforunityserver==10.3.0') | Should Be $true
         }
     }
 }
@@ -60,11 +72,15 @@ Describe 'plugin manifests - unityMCP args (ticket #59 / R1)' {
 $global:mma_skipLive = -not (($env:UNITY_WRAPPER_LIVE_MCP -eq '1') -and (Get-Command uvx -ErrorAction SilentlyContinue))
 
 function Invoke-MmaLiveMcp {
-    param([string]$ManifestPath, [int]$TimeoutSeconds = 180)
+    param([string]$ManifestPath, [int]$TimeoutSeconds = 180,
+          [string]$ProjectDir, [object[]]$Requests = @(), [scriptblock]$Predicate)
 
     $srv = Get-MmaManifestServer $ManifestPath
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('mma-live-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tmp | Out-Null
+    $ownTmp = [string]::IsNullOrEmpty($ProjectDir)
+    if ($ownTmp) {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('mma-live-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp | Out-Null
+    } else { $tmp = $ProjectDir }
     $proc = $null
     try {
         $resolve = { param($s) ([string]$s).Replace('${CLAUDE_PROJECT_DIR}', $tmp) }
@@ -98,7 +114,20 @@ function Invoke-MmaLiveMcp {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $sent = $false
         $pending = $null
-        while ([DateTime]::UtcNow -lt $deadline -and -not ($responses.ContainsKey(2) -and $responses.ContainsKey(3))) {
+        $lastExtra = [DateTime]::MinValue
+        $done = {
+            if (-not ($responses.ContainsKey(2) -and $responses.ContainsKey(3))) { return $false }
+            if ($Predicate) { return [bool](& $Predicate $responses) }
+            foreach ($rq in $Requests) { if (-not $responses.ContainsKey([int]$rq.id)) { return $false } }
+            return $true
+        }
+        while ([DateTime]::UtcNow -lt $deadline -and -not (& $done)) {
+            # Extra requests are re-sent every 5 s: the server's sync from the
+            # editor may land after the first answer.
+            if ($sent -and $Requests.Count -gt 0 -and ([DateTime]::UtcNow - $lastExtra).TotalSeconds -ge 5) {
+                $lastExtra = [DateTime]::UtcNow
+                foreach ($rq in $Requests) { & $send $rq }
+            }
             if ($null -eq $pending) { $pending = $proc.StandardOutput.ReadLineAsync() }
             if (-not $pending.Wait(1000)) { continue }
             $line = $pending.Result
@@ -111,13 +140,15 @@ function Invoke-MmaLiveMcp {
                 & $send @{ jsonrpc = '2.0'; method = 'notifications/initialized' }
                 & $send @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }
                 & $send @{ jsonrpc = '2.0'; id = 3; method = 'resources/list'; params = @{} }
+                $lastExtra = [DateTime]::UtcNow
+                foreach ($rq in $Requests) { & $send $rq }
             }
         }
         return $responses
     }
     finally {
         if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch {} }
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        if ($ownTmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -135,6 +166,42 @@ Describe 'unityMCP server started from the manifest exposes project-scoped tools
             ($toolNames -contains 'execute_custom_tool') | Should Be $true
             $uris = @($r[3].result.resources | ForEach-Object { $_.uri })
             ($uris -contains 'mcpforunity://custom-tools') | Should Be $true
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Ticket #64 live-editor leg: needs a running editor (environment_start) for
+# the checkout in UNITY_WRAPPER_LIVE_EDITOR_CHECKOUT and a project tool name
+# in UNITY_WRAPPER_LIVE_CUSTOM_TOOL. Asserts reachability only; tool_count on
+# mcpforunity://custom-tools is NOT asserted (may stay empty under stdio).
+# ---------------------------------------------------------------------------
+$global:mma_skipEditor = [string]::IsNullOrEmpty($env:UNITY_WRAPPER_LIVE_EDITOR_CHECKOUT) -or [string]::IsNullOrEmpty($env:UNITY_WRAPPER_LIVE_CUSTOM_TOOL) -or -not (Get-Command uvx -ErrorAction SilentlyContinue)
+
+Describe 'unityMCP project tool is reachable through a live editor (ticket #64, live-editor, opt-in)' {
+
+    foreach ($mf in $global:mma_manifests) {
+        $name = $mf.Name
+        $path = $mf.Path
+
+        It -Skip:$global:mma_skipEditor "$name manifest: execute_custom_tool runs the project's tool and tools/list names it" {
+            $tool = $env:UNITY_WRAPPER_LIVE_CUSTOM_TOOL
+            $reqs = @(
+                @{ jsonrpc = '2.0'; id = 10; method = 'tools/call'; params = @{
+                    name = 'execute_custom_tool'
+                    arguments = @{ tool_name = $tool; parameters = @{} } } }
+            )
+            $notFound = { param($r) ($r | ConvertTo-Json -Depth 10 -Compress) -match 'not found' }
+            $pred = {
+                param($r)
+                $r.ContainsKey(10) -and -not (& $notFound $r[10])
+            }
+            $r = Invoke-MmaLiveMcp -ManifestPath $path -ProjectDir $env:UNITY_WRAPPER_LIVE_EDITOR_CHECKOUT `
+                -Requests $reqs -Predicate $pred -TimeoutSeconds 120
+            $r.ContainsKey(10) | Should Be $true
+            (& $notFound $r[10]) | Should Be $false
+            $toolNames = @($r[2].result.tools | ForEach-Object { $_.name })
+            ($toolNames -contains $tool) | Should Be $true
         }
     }
 }
